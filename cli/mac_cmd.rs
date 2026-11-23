@@ -15,13 +15,22 @@ fn compute_file_mac(key: &[u8; KEY_BYTES], path: &str) -> Result<[u8; TAG_BYTES]
     let mut f = File::open(path)?;
     let mut m = WilisMac::new(key);
     let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
+    let read_res = (|| -> Result<()> {
+        loop {
+            let n = match f.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            };
+            if n == 0 {
+                break;
+            }
+            m.update(&buf[..n]);
         }
-        m.update(&buf[..n]);
-    }
+        Ok(())
+    })();
+    zeroize_bytes(&mut buf);
+    read_res?;
     Ok(m.finalize())
 }
 

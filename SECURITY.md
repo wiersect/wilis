@@ -12,12 +12,13 @@
 | Threat | Mitigation in Wilis |
 | :--- | :--- |
 | **GPU / ASIC Offline Brute-Force** | Hybrid memory-hard `WilisKDF` v2 requiring 16–64 MiB RAM per guess + optional 2FA `--keyfile` |
-| **Cache-Timing Side Channels** | Zero S-Box lookup tables; constant-time tag comparison (`ct_eq`); data-independent Pass 0 in `WilisKDF` |
-| **Ciphertext Malleability / Bit Flips** | 256-bit keyed authentication tag (`WilisAEAD`) verified before releasing plaintext |
+| **Cache-Timing Side Channels** | Zero S-Box lookup tables; constant-time tag comparison (`ct_eq`); branchless, division-free constant-time Module-LWE & `GF(2^8)` arithmetic; data-independent Pass 0 in `WilisKDF` |
+| **Ciphertext Malleability / Bit Flips** | 256-bit keyed authentication tag (`WilisAEAD`) verified before releasing plaintext; Fujisaki-Okamoto IND-CCA2 implicit rejection in `WilisKEM`; canonical Base64 & 13-bit packing |
 | **Header / Parameter Downgrade** | Full header bytes (including KDF cost, salt, nonce, chunk size) cryptographically bound into AAD |
 | **File Truncation / Chunk Reordering** | `WILS` v2 per-chunk nonce derivation + `(header_digest, chunk_index, is_final)` binding |
-| **Secret Leakage in RAM / Shell** | Volatile zeroization (`write_volatile` + `compiler_fence`) on drop/failure + hidden `--pass-prompt` |
-| **Nonce Collision** | 192-bit random nonces read from OS CSPRNG (`/dev/urandom`) |
+| **Archive Traversal / Symlink Escape** | `WilisDir` rejects `..`, absolute/colon/reserved Windows paths, duplicate entries, trailing garbage, and existing symlinks inside extraction targets |
+| **Secret Leakage in RAM / Disk / Shell** | Volatile zeroization (`write_volatile` + `compiler_fence`) on drop & error paths, owner-only `0600` Unix permissions on `.wsk`/`.wks`/vault files, hidden `--pass-prompt` |
+| **Nonce Collision** | 192-bit random nonces read from native OS CSPRNG (`/dev/urandom` on Unix, `BCryptGenRandom` on Windows) |
 
 ## Reporting Cryptanalytic Findings
 

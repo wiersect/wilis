@@ -1,4 +1,4 @@
-# Wilis Cryptographic Specification (v0.4.0)
+# Wilis Cryptographic Specification (v0.4.2)
 
 This document defines the exact mathematical construction and binary container wire formats of the **Wilis** cryptographic suite.
 
@@ -72,6 +72,9 @@ Because every sub-layer is provably bijective (`Chi-5` has exact order 4; every 
 | AEAD Finalize | `WILS_FIN` | `0x5749_4C53_5F46_494E` |
 | KDF | `WILS_KDF` | `0x5749_4C53_5F4B_4446` |
 | Hash | `WILS_HSH` | `0x5749_4C53_5F48_5348` |
+| XOF | `WILS_XOF` | `0x5749_4C53_5F58_4F46` |
+| MAC | `WILS_MAC` | `0x5749_4C53_5F4D_4143` |
+| Ratchet | `WILS_RAT` | `0x5749_4C53_5F52_4154` |
 
 ---
 
@@ -163,8 +166,8 @@ Built exclusively from `WilisHash-256` (`n = 32` bytes), without relying on fact
 
 ## 8. Archive (`WDIR` v1) & Vault (`WVLT` v1) Formats
 
-- **`WDIR` v1:** `[ "WDIR": 4B ][ ver=1: 1B ][ count: u64 LE ]` followed by sorted entries `[ path_len: u32 LE ][ utf8_rel_posix_path ][ file_len: u64 LE ][ file_bytes ]`, streamed through `WILS` v2 AEAD. Unpacking enforces strict path-traversal rejection.
-- **`WVLT` v1:** `[ "WVLT": 4B ][ ver=1: 1B ][ count: u32 LE ]` followed by `[ klen: u32 LE ][ key ][ vlen: u32 LE ][ val ]`, authenticated with `WilisAEAD` (bound AAD `"wilis-vault-v1"`) and saved atomically via sibling `.wils.tmp` rename.
+- **`WDIR` v1:** `[ "WDIR": 4B ][ ver=1: 1B ][ count: u64 LE ]` followed by sorted entries `[ path_len: u32 LE ][ utf8_rel_posix_path ][ file_len: u64 LE ][ file_bytes ]`, streamed through `WILS` v2 AEAD. Unpacking enforces strict path-traversal, symlink-escape, duplicate-entry, Windows reserved device name, and trailing-byte rejection.
+- **`WVLT` v1:** `[ "WVLT": 4B ][ ver=1: 1B ][ count: u32 LE ]` followed by `[ klen: u32 LE ][ key ][ vlen: u32 LE ][ val ]`, authenticated with `WilisAEAD` (bound AAD `"wilis-vault-v1"`) and saved atomically via owner-only (`0600` on Unix) sibling `<path>.tmp` rename.
 
 
 ---
@@ -178,7 +181,7 @@ Built exclusively from `WilisHash-256` (`n = 32` bytes), without relying on fact
 
 ## 10. Post-Quantum KEM (`WilisKEM`) & Hybrid Public-Key Encryption (`WPKE` v1)
 
-- **Ring:** $R_q = \mathbb{Z}_{7681}[X] / (X^{256} + 1)$, module rank $k = 3$ (768-dimensional Module-LWE), secret/error distribution $\mathrm{CBD}_2$ (coefficients in $\{-2, -1, 0, 1, 2\}$).
+- **Ring:** $R_q = \mathbb{Z}_{7681}[X] / (X^{256} + 1)$, module rank $k = 3$ (768-dimensional Module-LWE), secret/error distribution $\mathrm{CBD}_2$ (coefficients in $\{-2, -1, 0, 1, 2\}$), implemented with branchless, division-free constant-time modular addition, subtraction, Barrett reduction, and message bit decoding.
 - **Exact Noise Margin:** Inner-product decryption noise has standard deviation $\sigma_z = \sqrt{1537} \approx 39.2$, yielding a $48.98\sigma$ margin below the threshold $\lfloor q/4 \rfloor = 1920$ (negligible failure probability $< 2^{-1700}$).
 - **Canonical 13-bit Packing:** 8 coefficients pack into 13 bytes (`416` bytes/poly). Unpacking rejects any coefficient $\ge 7681$.
 - **Fujisaki-Okamoto IND-CCA2 Transform:** Uses `WilisXOF("WKEM_FO_G1")` to derive $(\bar{k}, \text{coins})$ from $(m \| H(pk))$, verifies exact re-encryption in constant time (`ct_eq`), and branchlessly selects between $K_{\text{ok}}$ (`WKEM_FO_K1`) and implicit rejection key $K_{\text{rej}}$ (`WKEM_FO_R1` using secret $z$).

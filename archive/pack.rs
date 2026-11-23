@@ -54,8 +54,12 @@ pub fn pack_directory<W: Write>(root_dir: &Path, writer: &mut W) -> Result<u64> 
             let mut f = File::open(full_path)?;
             let mut remaining = file_len;
             while remaining > 0 {
-                let to_read = (remaining as usize).min(copy_buf.len());
-                let n = f.read(&mut copy_buf[..to_read])?;
+                let to_read = remaining.min(copy_buf.len() as u64) as usize;
+                let n = match f.read(&mut copy_buf[..to_read]) {
+                    Ok(n) => n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e.into()),
+                };
                 if n == 0 {
                     return Err(WilisError::InvalidFormat(format!(
                         "file '{}' changed size during archiving",

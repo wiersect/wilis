@@ -70,7 +70,10 @@ impl Share {
 
     /// Encodes the share as a portable text token (`wilis-share-v1:<base64>`).
     pub fn encode_string(&self) -> String {
-        format!("{SHARE_PREFIX}{}", encode_base64(&self.to_bytes()))
+        let mut raw = self.to_bytes();
+        let encoded = format!("{SHARE_PREFIX}{}", encode_base64(&raw));
+        zeroize_bytes(&mut raw);
+        encoded
     }
 
     /// Decodes a portable share token (`wilis-share-v1:<base64>`).
@@ -79,8 +82,10 @@ impl Share {
         let b64 = trimmed.strip_prefix(SHARE_PREFIX).ok_or_else(|| {
             WilisError::InvalidEncoding(format!("share must begin with '{SHARE_PREFIX}'"))
         })?;
-        let raw = decode_base64(b64)?;
-        Self::from_bytes(&raw)
+        let mut raw = decode_base64(b64)?;
+        let res = Self::from_bytes(&raw);
+        zeroize_bytes(&mut raw);
+        res
     }
 }
 
@@ -122,8 +127,14 @@ pub fn split_secret(secret: &[u8], total: u8, threshold: u8) -> Result<Vec<Share
     let degree = (threshold - 1) as usize;
 
     // Generate all random polynomial coefficients in one OS CSPRNG read
-    let mut coeffs = vec![0u8; secret_len * degree];
-    fill_random(&mut coeffs)?;
+    let coeff_len = secret_len
+        .checked_mul(degree)
+        .ok_or_else(|| WilisError::InvalidParameters("secret size overflow in split_secret".into()))?;
+    let mut coeffs = vec![0u8; coeff_len];
+    if let Err(e) = fill_random(&mut coeffs) {
+        zeroize_bytes(&mut coeffs);
+        return Err(e);
+    }
 
     let mut shares = Vec::with_capacity(total as usize);
     for share_idx in 1..=total {

@@ -6,7 +6,7 @@
 
 use crate::core::constants::{KEY_BYTES, NONCE_BYTES, SALT_BYTES};
 use crate::error::{Result, WilisError};
-use crate::utils::zeroize::SecretKey;
+use crate::utils::zeroize::{zeroize_bytes, SecretKey};
 
 /// Fills `dest` with cryptographically secure random bytes from the OS CSPRNG.
 #[cfg(unix)]
@@ -19,9 +19,12 @@ pub fn fill_random(dest: &mut [u8]) -> Result<()> {
     }
     let mut file = File::open("/dev/urandom")
         .map_err(|e| WilisError::RandomSourceError(format!("failed to open /dev/urandom: {e}")))?;
-    file.read_exact(dest).map_err(|e| {
-        WilisError::RandomSourceError(format!("failed to read random bytes: {e}"))
-    })?;
+    if let Err(e) = file.read_exact(dest) {
+        zeroize_bytes(dest);
+        return Err(WilisError::RandomSourceError(format!(
+            "failed to read random bytes: {e}"
+        )));
+    }
     Ok(())
 }
 
@@ -40,6 +43,7 @@ pub fn fill_random(dest: &mut [u8]) -> Result<()> {
         ) -> i32;
     }
 
+    let mut failed_status: Option<i32> = None;
     for chunk in dest.chunks_mut(1 << 24) {
         // SAFETY: `chunk` is valid, writable memory of length `chunk.len() <= 2^24 < u32::MAX`.
         let status = unsafe {
@@ -51,11 +55,16 @@ pub fn fill_random(dest: &mut [u8]) -> Result<()> {
             )
         };
         if status < 0 {
-            return Err(WilisError::RandomSourceError(format!(
-                "BCryptGenRandom failed with NTSTATUS 0x{:08x}",
-                status as u32
-            )));
+            failed_status = Some(status);
+            break;
         }
+    }
+    if let Some(status) = failed_status {
+        zeroize_bytes(dest);
+        return Err(WilisError::RandomSourceError(format!(
+            "BCryptGenRandom failed with NTSTATUS 0x{:08x}",
+            status as u32
+        )));
     }
     Ok(())
 }
@@ -64,7 +73,9 @@ pub fn fill_random(dest: &mut [u8]) -> Result<()> {
 pub fn generate_key() -> Result<SecretKey> {
     let mut raw = [0u8; KEY_BYTES];
     fill_random(&mut raw)?;
-    Ok(SecretKey::from_bytes(raw))
+    let key = SecretKey::from_bytes(raw);
+    zeroize_bytes(&mut raw);
+    Ok(key)
 }
 
 /// Generates a fresh 192-bit random nonce.

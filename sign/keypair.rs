@@ -80,7 +80,10 @@ impl SigningKey {
         let mut secret_seed = [0u8; HASH_BYTES];
         let mut pub_seed = [0u8; HASH_BYTES];
         fill_random(&mut secret_seed)?;
-        fill_random(&mut pub_seed)?;
+        if let Err(e) = fill_random(&mut pub_seed) {
+            zeroize_bytes(&mut secret_seed);
+            return Err(e);
+        }
 
         let levels = build_merkle_tree(&secret_seed, &pub_seed, height);
         let root = levels[height as usize][0];
@@ -92,6 +95,7 @@ impl SigningKey {
             height,
             next_index: 0,
         };
+        zeroize_bytes(&mut secret_seed);
         let pk = sk.verifying_key();
         Ok((sk, pk))
     }
@@ -207,13 +211,15 @@ impl SigningKey {
         pub_seed.copy_from_slice(&body[9 + HASH_BYTES..9 + HASH_BYTES * 2]);
         root.copy_from_slice(&body[9 + HASH_BYTES * 2..9 + HASH_BYTES * 3]);
 
-        Ok(Self {
+        let sk = Self {
             secret_seed,
             pub_seed,
             root,
             height,
             next_index,
-        })
+        };
+        zeroize_bytes(&mut secret_seed);
+        Ok(sk)
     }
 }
 
@@ -226,6 +232,9 @@ impl Drop for SigningKey {
 impl VerifyingKey {
     /// Verifies `signature` over `message` in constant time.
     pub fn verify(&self, message: &[u8], signature: &Signature) -> bool {
+        if !(MIN_TREE_HEIGHT..=MAX_TREE_HEIGHT).contains(&self.height) {
+            return false;
+        }
         if signature.height != self.height {
             return false;
         }
@@ -352,6 +361,11 @@ impl Signature {
         }
 
         let leaf_index = u32::from_le_bytes(data[6..10].try_into().expect("4 bytes"));
+        if leaf_index >= (1u32 << height) {
+            return Err(WilisError::InvalidFormat(format!(
+                "signature leaf_index {leaf_index} out of range for height {height}"
+            )));
+        }
         let mut pos = 10;
 
         let mut randomizer = [0u8; HASH_BYTES];

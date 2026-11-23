@@ -45,40 +45,38 @@ impl Poly {
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Coefficient-wise addition modulo `q`.
+    /// Branchless constant-time coefficient-wise addition modulo `q`.
     pub fn add(&self, rhs: &Self) -> Self {
         let mut out = Self::zero();
+        let q = KEM_Q as u32;
         for i in 0..KEM_N {
             let s = self.coeffs[i] as u32 + rhs.coeffs[i] as u32;
-            out.coeffs[i] = if s >= KEM_Q as u32 {
-                (s - KEM_Q as u32) as u16
-            } else {
-                s as u16
-            };
+            let diff = s.wrapping_sub(q);
+            // borrow = 0xFFFF_FFFF if s < q, else 0x0000_0000
+            let borrow = 0u32.wrapping_sub(diff >> 31);
+            out.coeffs[i] = ((s & borrow) | (diff & !borrow)) as u16;
         }
         out
     }
 
-    /// Coefficient-wise subtraction modulo `q`.
+    /// Branchless constant-time coefficient-wise subtraction modulo `q`.
     pub fn sub(&self, rhs: &Self) -> Self {
         let mut out = Self::zero();
+        let q = KEM_Q as u32;
         for i in 0..KEM_N {
-            let a = self.coeffs[i] as i32;
-            let b = rhs.coeffs[i] as i32;
-            let d = a - b;
-            out.coeffs[i] = if d < 0 {
-                (d + KEM_Q as i32) as u16
-            } else {
-                d as u16
-            };
+            let d = (self.coeffs[i] as i32) - (rhs.coeffs[i] as i32);
+            // Arithmetic shift: mask = 0xFFFF_FFFF if d < 0, else 0x0000_0000
+            let mask = (d >> 31) as u32;
+            out.coeffs[i] = ((d as u32).wrapping_add(q & mask)) as u16;
         }
         out
     }
 
-    /// Exact negacyclic polynomial multiplication modulo `(X^256 + 1, q)`.
+    /// Exact constant-time negacyclic polynomial multiplication modulo `(X^256 + 1, q)`.
     ///
-    /// Uses `i64` accumulators (max magnitude `256 * 7680^2 ≈ 1.5e10 << 2^63`)
-    /// so intermediate overflow is mathematically impossible.
+    /// Uses `i64` accumulators (max magnitude `256 * 7680^2 = 15,099,494,400 < 2^34`)
+    /// reduced via division-free, branchless Barrett reduction so no secret-dependent
+    /// hardware division or branch timing can leak secret polynomials.
     pub fn mul(&self, rhs: &Self) -> Self {
         let mut acc = [0i64; KEM_N];
         for i in 0..KEM_N {
@@ -94,11 +92,32 @@ impl Poly {
             }
         }
 
+        // Exact multiple of q = 7681 strictly greater than max |acc[i]| = 15,099,494,400:
+        // BIAS = 2,000,000 * 7681 = 15,362,000,000 -> x = (acc[i] + BIAS) in [0, 3.05e10].
+        const BIAS: i64 = 2_000_000 * (KEM_Q as i64);
+        // Barrett multiplier floor(2^64 / 7681) = 2,401,607,092,435,880.
+        const BARRETT_M: u128 = (1u128 << 64) / (KEM_Q as u128);
+        const Q64: u64 = KEM_Q as u64;
+
         let mut out = Self::zero();
-        let q64 = KEM_Q as i64;
         for i in 0..KEM_N {
-            out.coeffs[i] = acc[i].rem_euclid(q64) as u16;
+            let x = (acc[i] + BIAS) as u64;
+            let k = ((x as u128 * BARRETT_M) >> 64) as u64;
+            let r = x - k * Q64; // Guaranteed 0 <= r < 2 * Q64
+            let diff = r.wrapping_sub(Q64);
+            let borrow = 0u64.wrapping_sub(diff >> 63);
+            out.coeffs[i] = ((r & borrow) | (diff & !borrow)) as u16;
         }
+
+        // Wipe secret-derived accumulator array from the stack
+        for word in &mut acc {
+            // SAFETY: `word` is a valid, aligned mutable `i64` reference inside `acc`.
+            unsafe {
+                core::ptr::write_volatile(word as *mut i64, 0);
+            }
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+
         out
     }
 
@@ -117,13 +136,16 @@ impl Poly {
         out
     }
 
-    /// Decodes a noisy polynomial back into 32 message bytes (threshold at `q/4 = 1920`).
+    /// Branchless, division-free decoding of a noisy polynomial back into 32 message bytes
+    /// (maps `[1920..=5760] -> 1`, and `[0..1920) U (5760..7681) -> 0`).
     pub fn to_msg_bits(&self) -> [u8; 32] {
         let mut msg = [0u8; 32];
         for (i, &c) in self.coeffs.iter().enumerate() {
-            // Maps [1920..=5760] -> 1, and [0..1920) U (5760..7681) -> 0
-            let shifted = (c as u32 + 1920) % (KEM_Q as u32);
-            let bit = if shifted >= 3840 { 1u8 } else { 0u8 };
+            let cu = c as u32;
+            // ge_1920 = 1 iff cu >= 1920; le_5760 = 1 iff cu <= 5760 (zero branches/division)
+            let ge_1920 = (cu.wrapping_sub(1920) >> 31) ^ 1;
+            let le_5760 = (5760u32.wrapping_sub(cu) >> 31) ^ 1;
+            let bit = (ge_1920 & le_5760) as u8;
             msg[i / 8] |= bit << (i % 8);
         }
         msg
@@ -167,26 +189,21 @@ impl Poly {
         xof.squeeze(&mut raw);
 
         let mut out = Self::zero();
+        let q = KEM_Q as u32;
         for (i, &byte) in raw.iter().enumerate() {
-            // Low nibble -> coeff 2*i
+            // Low nibble -> coeff 2*i (branchless sign reduction mod q)
             let a0 = (byte & 1) + ((byte >> 1) & 1);
             let b0 = ((byte >> 2) & 1) + ((byte >> 3) & 1);
             let d0 = a0 as i32 - b0 as i32;
-            out.coeffs[i * 2] = if d0 < 0 {
-                (d0 + KEM_Q as i32) as u16
-            } else {
-                d0 as u16
-            };
+            let m0 = (d0 >> 31) as u32;
+            out.coeffs[i * 2] = ((d0 as u32).wrapping_add(q & m0)) as u16;
 
-            // High nibble -> coeff 2*i + 1
+            // High nibble -> coeff 2*i + 1 (branchless sign reduction mod q)
             let a1 = ((byte >> 4) & 1) + ((byte >> 5) & 1);
             let b1 = ((byte >> 6) & 1) + ((byte >> 7) & 1);
             let d1 = a1 as i32 - b1 as i32;
-            out.coeffs[i * 2 + 1] = if d1 < 0 {
-                (d1 + KEM_Q as i32) as u16
-            } else {
-                d1 as u16
-            };
+            let m1 = (d1 >> 31) as u32;
+            out.coeffs[i * 2 + 1] = ((d1 as u32).wrapping_add(q & m1)) as u16;
         }
         zeroize_bytes(&mut raw);
         out
@@ -239,8 +256,11 @@ impl Poly {
 pub fn vec_dot(a: &[Poly; KEM_K], b: &[Poly; KEM_K]) -> Poly {
     let mut sum = Poly::zero();
     for i in 0..KEM_K {
-        let prod = a[i].mul(&b[i]);
-        sum = sum.add(&prod);
+        let mut prod = a[i].mul(&b[i]);
+        let next = sum.add(&prod);
+        prod.zeroize();
+        sum.zeroize();
+        sum = next;
     }
     sum
 }

@@ -104,7 +104,14 @@ pub fn read_hidden_passphrase(prompt: &str, confirm: bool) -> Result<String> {
         ));
     }
     if confirm {
-        let mut second = prompt_once("Confirm passphrase: ")?;
+        let mut second = match prompt_once("Confirm passphrase: ") {
+            Ok(s) => s,
+            Err(e) => {
+                // SAFETY: Overwriting UTF-8 string bytes with 0x00 preserves UTF-8 validity.
+                zeroize_bytes(unsafe { first.as_bytes_mut() });
+                return Err(e);
+            }
+        };
         let matches = ct_eq(first.as_bytes(), second.as_bytes());
         // SAFETY: Overwriting UTF-8 string bytes with 0x00 preserves UTF-8 validity.
         zeroize_bytes(unsafe { second.as_bytes_mut() });
@@ -125,9 +132,14 @@ fn prompt_once(prompt: &str) -> Result<String> {
     let _guard = EchoGuard::disable();
     let mut line = String::new();
     let stdin = io::stdin();
-    stdin.lock().read_line(&mut line)?;
+    let read_res = stdin.lock().read_line(&mut line);
     drop(_guard);
     eprintln!();
+    if let Err(e) = read_res {
+        // SAFETY: Overwriting UTF-8 string bytes with 0x00 preserves UTF-8 validity.
+        zeroize_bytes(unsafe { line.as_bytes_mut() });
+        return Err(e.into());
+    }
 
     while line.ends_with('\n') || line.ends_with('\r') {
         line.pop();
@@ -140,17 +152,25 @@ pub fn hash_keyfile(path: &str) -> Result<[u8; HASH_BYTES]> {
     let mut file = File::open(path)?;
     let mut hasher = WilisHash::new();
     let mut buf = [0u8; 64 * 1024];
-    let mut total: u64 = 0;
 
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
+    let read_res = (|| -> Result<u64> {
+        let mut total: u64 = 0;
+        loop {
+            let n = match file.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            };
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            total = total.saturating_add(n as u64);
         }
-        hasher.update(&buf[..n]);
-        total += n as u64;
-    }
+        Ok(total)
+    })();
     zeroize_bytes(&mut buf);
+    let total = read_res?;
 
     if total == 0 {
         return Err(WilisError::InvalidKey(format!(

@@ -3,6 +3,7 @@
 use crate::core::constants::{DOMAIN_MSG, RATE_BYTES, ROUNDS_DATA};
 use crate::core::permute::permute;
 use crate::core::state::State;
+use crate::utils::zeroize::zeroize_bytes;
 
 /// Encrypts `plaintext` in duplex sponge mode while updating `state` in place.
 ///
@@ -16,11 +17,12 @@ pub fn encrypt_blocks(state: &mut State, plaintext: &[u8]) -> Vec<u8> {
     let mut chunks = plaintext.chunks_exact(RATE_BYTES);
 
     for chunk in chunks.by_ref() {
-        let ks = state.rate_bytes();
+        let mut ks = state.rate_bytes();
         let mut c_block = [0u8; RATE_BYTES];
         for i in 0..RATE_BYTES {
             c_block[i] = chunk[i] ^ ks[i];
         }
+        zeroize_bytes(&mut ks);
         ciphertext.extend_from_slice(&c_block);
         state.set_rate_bytes(&c_block);
         permute(state, ROUNDS_DATA);
@@ -36,6 +38,7 @@ pub fn encrypt_blocks(state: &mut State, plaintext: &[u8]) -> Vec<u8> {
     // Multi-rate domain padding at exact remainder offset (handles rem.len() == 0 too)
     rate[rem.len()] ^= 0x80;
     state.set_rate_bytes(&rate);
+    zeroize_bytes(&mut rate);
 
     ciphertext
 }

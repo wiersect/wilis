@@ -9,7 +9,7 @@ use crate::error::{Result, WilisError};
 use crate::format::header::{ContainerHeader, KeyMode, FORMAT_VERSION_V2};
 use crate::hash::hash;
 use crate::kdf::derive_key_with_keyfile;
-use crate::stream::chunk_nonce::{build_chunk_aad, derive_chunk_nonce, MAX_CHUNK_SIZE};
+use crate::stream::chunk_nonce::{build_chunk_aad, derive_chunk_nonce, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE};
 use crate::utils::zeroize::zeroize_bytes;
 
 /// Decrypts a `WILS` v2 stream using a raw 256-bit key.
@@ -81,9 +81,9 @@ fn decrypt_stream_core<R: Read, W: Write>(
     let chunk_size = header.chunk_size.ok_or_else(|| {
         WilisError::InvalidFormat("missing chunk_size in streaming header".into())
     })?;
-    if chunk_size > MAX_CHUNK_SIZE {
+    if !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size) {
         return Err(WilisError::InvalidFormat(format!(
-            "chunk_size {chunk_size} exceeds maximum safe limit"
+            "chunk_size {chunk_size} out of safe range [{MIN_CHUNK_SIZE}..={MAX_CHUNK_SIZE}]"
         )));
     }
 
@@ -136,7 +136,9 @@ fn decrypt_stream_core<R: Read, W: Write>(
         let pt_len = pt.len() as u64;
         zeroize_bytes(&mut pt);
         write_res?;
-        total_plain += pt_len;
+        total_plain = total_plain
+            .checked_add(pt_len)
+            .ok_or_else(|| WilisError::InvalidFormat("stream plaintext counter overflow".into()))?;
 
         if is_final {
             seen_final = true;
@@ -165,7 +167,11 @@ enum ReadOutcome {
 fn read_exact_or_clean_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<ReadOutcome> {
     let mut filled = 0;
     while filled < buf.len() {
-        let n = reader.read(&mut buf[filled..])?;
+        let n = match reader.read(&mut buf[filled..]) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        };
         if n == 0 {
             return Ok(if filled == 0 {
                 ReadOutcome::Eof

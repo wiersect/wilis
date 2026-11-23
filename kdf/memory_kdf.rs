@@ -27,12 +27,13 @@ fn independent_ref_index(idx: usize) -> usize {
     if idx <= 1 {
         return 0;
     }
-    // Weyl-mixed quadratic hash strictly over the public slot index `idx`
+    // Weyl-mixed quadratic hash strictly over the public slot index `idx`.
+    // Compute modulo in u64 before casting to usize for 32-bit/64-bit determinism.
     let mut x = (idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     x ^= x >> 30;
     x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x ^= x >> 27;
-    (x as usize) % idx
+    (x % (idx as u64)) as usize
 }
 
 /// Derives a 256-bit [`SecretKey`] from a passphrase and 192-bit salt.
@@ -115,9 +116,11 @@ pub fn derive_key_with_keyfile(
     }
 
     // Phase 3 (Passes 1..passes): Data-dependent memory sweeps (resists TMTO & GPU cracking)
+    let mem_len_u64 = mem_len as u64;
     for pass in 1..params.passes {
         for idx in 0..mem_len {
-            let pick_idx = (acc.words[0] ^ acc.words[3].rotate_left(17)) as usize % mem_len;
+            // Compute modulo in u64 before casting to usize for exact 32-bit/64-bit determinism
+            let pick_idx = ((acc.words[0] ^ acc.words[3].rotate_left(17)) % mem_len_u64) as usize;
             let picked = table[pick_idx];
             let current = table[idx];
             for i in 0..STATE_WORDS {

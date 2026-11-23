@@ -120,5 +120,8 @@ pub fn derive_subkey(master_key: &[u8; KEY_BYTES], context: &[u8]) -> SecretKey 
     m.update(b"WILS_SUBKEY_V1:");
     m.update(&(context.len() as u64).to_le_bytes());
     m.update(context);
-    SecretKey::from_bytes(m.finalize())
+    let mut raw = m.finalize();
+    let sk = SecretKey::from_bytes(raw);
+    zeroize_bytes(&mut raw);
+    sk
 }

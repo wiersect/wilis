@@ -64,6 +64,9 @@ pub fn extract_auth_path(
     levels: &[Vec<[u8; HASH_BYTES]>],
     leaf_idx: u32,
 ) -> Vec<[u8; HASH_BYTES]> {
+    if levels.len() < 2 {
+        return Vec::new();
+    }
     let height = levels.len() - 1;
     let mut path = Vec::with_capacity(height);
     let mut idx = leaf_idx as usize;

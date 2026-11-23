@@ -107,14 +107,35 @@ impl KemSecretKey {
             )));
         }
         let mut pos = 4;
-        let s0 = Poly::unpack(&data[pos..pos + POLY_BYTES])?;
+        let mut s0 = Poly::unpack(&data[pos..pos + POLY_BYTES])?;
         pos += POLY_BYTES;
-        let s1 = Poly::unpack(&data[pos..pos + POLY_BYTES])?;
+        let mut s1 = match Poly::unpack(&data[pos..pos + POLY_BYTES]) {
+            Ok(p) => p,
+            Err(e) => {
+                s0.zeroize();
+                return Err(e);
+            }
+        };
         pos += POLY_BYTES;
-        let s2 = Poly::unpack(&data[pos..pos + POLY_BYTES])?;
+        let mut s2 = match Poly::unpack(&data[pos..pos + POLY_BYTES]) {
+            Ok(p) => p,
+            Err(e) => {
+                s0.zeroize();
+                s1.zeroize();
+                return Err(e);
+            }
+        };
         pos += POLY_BYTES;
 
-        let pk = KemPublicKey::from_bytes(&data[pos..pos + KEM_PK_BYTES])?;
+        let pk = match KemPublicKey::from_bytes(&data[pos..pos + KEM_PK_BYTES]) {
+            Ok(k) => k,
+            Err(e) => {
+                s0.zeroize();
+                s1.zeroize();
+                s2.zeroize();
+                return Err(e);
+            }
+        };
         pos += KEM_PK_BYTES;
 
         let mut pk_hash = [0u8; 32];
@@ -123,6 +144,9 @@ impl KemSecretKey {
 
         // Verify stored pk_hash matches pk to reject corrupted key files
         if !ct_eq(&pk_hash, &hash(&pk.to_bytes())) {
+            s0.zeroize();
+            s1.zeroize();
+            s2.zeroize();
             return Err(WilisError::InvalidKey(
                 "WilisKEM secret key failed public-key consistency check".into(),
             ));
@@ -131,12 +155,14 @@ impl KemSecretKey {
         let mut z = [0u8; 32];
         z.copy_from_slice(&data[pos..pos + 32]);
 
-        Ok(Self {
+        let sk = Self {
             s: [s0, s1, s2],
             pk,
             pk_hash,
             z,
-        })
+        };
+        zeroize_bytes(&mut z);
+        Ok(sk)
     }
 }
 
@@ -199,15 +225,22 @@ fn cpa_encrypt(pk: &KemPublicKey, msg: &[u8; 32], coins: &[u8; 32]) -> KemCipher
         let mut acc = e1[col].clone();
         for row in 0..KEM_K {
             let a_rc = Poly::sample_uniform(&pk.rho, row as u8, col as u8);
-            let prod = a_rc.mul(&r[row]);
-            acc = acc.add(&prod);
+            let mut prod = a_rc.mul(&r[row]);
+            let next = acc.add(&prod);
+            prod.zeroize();
+            acc.zeroize();
+            acc = next;
         }
         u[col] = acc;
     }
 
     // v = t^T * r + e2 + encode(msg)
     let mut m_poly = Poly::from_msg_bits(msg);
-    let v = vec_dot(&pk.t, &r).add(&e2).add(&m_poly);
+    let mut tr = vec_dot(&pk.t, &r);
+    let mut tr_e2 = tr.add(&e2);
+    let v = tr_e2.add(&m_poly);
+    tr.zeroize();
+    tr_e2.zeroize();
 
     // Wipe ephemeral secret polynomials from memory
     for p in &mut r {
@@ -260,7 +293,10 @@ pub fn keygen() -> Result<(KemSecretKey, KemPublicKey)> {
     let mut z = [0u8; 32];
     fill_random(&mut rho)?;
     fill_random(&mut sigma)?;
-    fill_random(&mut z)?;
+    if let Err(e) = fill_random(&mut z) {
+        zeroize_bytes(&mut sigma);
+        return Err(e);
+    }
 
     let s = [
         Poly::sample_cbd2(&sigma, 0),
@@ -280,8 +316,11 @@ pub fn keygen() -> Result<(KemSecretKey, KemPublicKey)> {
         let mut acc = e[row].clone();
         for col in 0..KEM_K {
             let a_rc = Poly::sample_uniform(&rho, row as u8, col as u8);
-            let prod = a_rc.mul(&s[col]);
-            acc = acc.add(&prod);
+            let mut prod = a_rc.mul(&s[col]);
+            let next = acc.add(&prod);
+            prod.zeroize();
+            acc.zeroize();
+            acc = next;
         }
         t[row] = acc;
     }
@@ -297,6 +336,7 @@ pub fn keygen() -> Result<(KemSecretKey, KemPublicKey)> {
         pk_hash,
         z,
     };
+    zeroize_bytes(&mut z);
     Ok((sk, pk))
 }
 
@@ -335,7 +375,7 @@ pub fn decapsulate(sk: &KemSecretKey, ct: &KemCiphertext) -> SecretKey {
     let mut ss_rej = derive_final_shared_secret(b"WKEM_FO_R1", &sk.z, &ct_hash);
 
     // Branchless constant-time select between real secret and implicit rejection secret
-    let mask = 0u8.wrapping_sub(is_valid as u8); // 0xFF if valid, 0x00 if invalid
+    let mask = core::hint::black_box(0u8.wrapping_sub(is_valid as u8)); // 0xFF if valid, 0x00 if invalid
     let mut final_ss = [0u8; 32];
     for i in 0..32 {
         final_ss[i] = (ss_ok[i] & mask) | (ss_rej[i] & !mask);

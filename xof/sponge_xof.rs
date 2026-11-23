@@ -83,6 +83,7 @@ impl WilisXof {
         padded[..self.buf_pos].copy_from_slice(&self.buf[..self.buf_pos]);
         padded[self.buf_pos] = 0x80;
         self.state.xor_rate_block(&padded);
+        zeroize_bytes(&mut padded);
         self.state.words[5] ^= 0xFF;
         permute(&mut self.state, ROUNDS_FULL);
 

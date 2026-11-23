@@ -75,11 +75,15 @@ fn validate_chunk_size(chunk_size: u32) -> Result<()> {
     Ok(())
 }
 
-/// Reads up to `buf.len()` bytes, retrying short reads until EOF or buffer full.
+/// Reads up to `buf.len()` bytes, retrying short reads and `EINTR` until EOF or buffer full.
 fn read_full_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
-        let n = reader.read(&mut buf[filled..])?;
+        let n = match reader.read(&mut buf[filled..]) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        };
         if n == 0 {
             break;
         }
@@ -100,53 +104,62 @@ fn encrypt_stream_core<R: Read, W: Write>(
     let header_digest = hash(&header_bytes);
     writer.write_all(&header_bytes)?;
 
-    let mut total_in: u64 = 0;
-    let mut total_out: u64 = header_bytes.len() as u64;
     let cs = chunk_size as usize;
 
     // Lookahead buffer lets us know with certainty when the current chunk is the final one
     let mut cur_buf = vec![0u8; cs];
     let mut next_buf = vec![0u8; cs];
 
-    let mut cur_len = read_full_or_eof(reader, &mut cur_buf)?;
-    let mut chunk_index: u64 = 0;
+    let stream_res = (|| -> Result<(u64, u64)> {
+        let mut total_in: u64 = 0;
+        let mut total_out: u64 = header_bytes.len() as u64;
+        let mut cur_len = read_full_or_eof(reader, &mut cur_buf)?;
+        let mut chunk_index: u64 = 0;
 
-    loop {
-        let next_len = if cur_len == cs {
-            read_full_or_eof(reader, &mut next_buf)?
-        } else {
-            0
-        };
-        let is_final = next_len == 0;
+        loop {
+            let next_len = if cur_len == cs {
+                read_full_or_eof(reader, &mut next_buf)?
+            } else {
+                0
+            };
+            let is_final = next_len == 0;
 
-        let chunk_nonce = derive_chunk_nonce(&header.nonce, chunk_index, is_final);
-        let chunk_aad = build_chunk_aad(&header_digest, chunk_index, is_final, user_aad);
-        let (ct, tag) = seal(key, &chunk_nonce, &chunk_aad, &cur_buf[..cur_len]);
+            let chunk_nonce = derive_chunk_nonce(&header.nonce, chunk_index, is_final);
+            let chunk_aad = build_chunk_aad(&header_digest, chunk_index, is_final, user_aad);
+            let (ct, tag) = seal(key, &chunk_nonce, &chunk_aad, &cur_buf[..cur_len]);
 
-        // Frame format per chunk: [chunk_pt_len: u32 LE][is_final: u8][ciphertext][tag: 32B]
-        let frame_len = (cur_len as u32).to_le_bytes();
-        let final_flag = [if is_final { 1u8 } else { 0u8 }];
-        writer.write_all(&frame_len)?;
-        writer.write_all(&final_flag)?;
-        writer.write_all(&ct)?;
-        writer.write_all(&tag)?;
+            // Frame format per chunk: [chunk_pt_len: u32 LE][is_final: u8][ciphertext][tag: 32B]
+            let frame_len = (cur_len as u32).to_le_bytes();
+            let final_flag = [if is_final { 1u8 } else { 0u8 }];
+            writer.write_all(&frame_len)?;
+            writer.write_all(&final_flag)?;
+            writer.write_all(&ct)?;
+            writer.write_all(&tag)?;
 
-        total_in += cur_len as u64;
-        total_out += (4 + 1 + ct.len() + tag.len()) as u64;
+            total_in = total_in
+                .checked_add(cur_len as u64)
+                .ok_or_else(|| WilisError::InvalidFormat("stream byte counter overflow".into()))?;
+            total_out = total_out
+                .checked_add((4 + 1 + ct.len() + tag.len()) as u64)
+                .ok_or_else(|| WilisError::InvalidFormat("stream output counter overflow".into()))?;
 
-        if is_final {
-            break;
+            if is_final {
+                break;
+            }
+
+            std::mem::swap(&mut cur_buf, &mut next_buf);
+            cur_len = next_len;
+            chunk_index = chunk_index
+                .checked_add(1)
+                .ok_or_else(|| WilisError::InvalidFormat("chunk counter overflow".into()))?;
         }
 
-        std::mem::swap(&mut cur_buf, &mut next_buf);
-        cur_len = next_len;
-        chunk_index = chunk_index
-            .checked_add(1)
-            .ok_or_else(|| WilisError::InvalidFormat("chunk counter overflow".into()))?;
-    }
+        writer.flush()?;
+        Ok((total_in, total_out))
+    })();
 
+    // Unconditionally zeroize plaintext lookahead buffers even on I/O error
     zeroize_bytes(&mut cur_buf);
     zeroize_bytes(&mut next_buf);
-    writer.flush()?;
-    Ok((total_in, total_out))
+    stream_res
 }

@@ -1,5 +1,7 @@
-//! Safe `WDIR` v1 unpacking with strict Zip-Slip / path-traversal protection.
+//! Safe `WDIR` v1 unpacking with strict Zip-Slip, symlink-escape, duplicate-entry,
+//! and cross-platform path-traversal protection.
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufReader, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -10,13 +12,46 @@ use crate::error::{Result, WilisError};
 use crate::stream::{decrypt_stream_with_key, decrypt_stream_with_passphrase};
 use crate::utils::zeroize::zeroize_bytes;
 
+/// Returns `true` if `part` is a Windows reserved DOS device name (e.g. `CON`, `NUL.txt`, `COM1`).
+fn is_windows_reserved_name(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or(part);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
 /// Validates a relative archive path to completely block path traversal (`..`, absolute
-/// paths, drive prefixes, backslashes, or null bytes).
+/// paths, drive prefixes, colons/ADS, backslashes, control chars, trailing dots/spaces,
+/// and Windows reserved device names).
 pub fn sanitize_archive_path(dest_root: &Path, rel_path: &str) -> Result<PathBuf> {
     if rel_path.is_empty()
         || rel_path.contains('\0')
         || rel_path.contains('\\')
+        || rel_path.contains(':')
         || rel_path.starts_with('/')
+        || rel_path.bytes().any(|b| b < 0x20 || b == 0x7F)
     {
         return Err(WilisError::InvalidFormat(format!(
             "unsafe path rejected in archive: '{rel_path}'"
@@ -29,6 +64,18 @@ pub fn sanitize_archive_path(dest_root: &Path, rel_path: &str) -> Result<PathBuf
     for comp in Path::new(rel_path).components() {
         match comp {
             Component::Normal(part) => {
+                let s = part.to_str().ok_or_else(|| {
+                    WilisError::InvalidEncoding("non-UTF-8 path component in archive".into())
+                })?;
+                if s.is_empty()
+                    || s.ends_with('.')
+                    || s.ends_with(' ')
+                    || is_windows_reserved_name(s)
+                {
+                    return Err(WilisError::InvalidFormat(format!(
+                        "unsafe or reserved path component rejected in archive: '{rel_path}'"
+                    )));
+                }
                 clean.push(part);
                 component_count += 1;
             }
@@ -47,6 +94,33 @@ pub fn sanitize_archive_path(dest_root: &Path, rel_path: &str) -> Result<PathBuf
     }
 
     Ok(clean)
+}
+
+/// Verifies that neither `dest_root` nor any intermediate directory component or target
+/// file under `dest_root` is a symbolic link (prevents symlink-escape writes).
+fn ensure_no_symlink_components(dest_root: &Path, rel_path: &str) -> Result<()> {
+    if let Ok(meta) = fs::symlink_metadata(dest_root) {
+        if meta.file_type().is_symlink() {
+            return Err(WilisError::InvalidFormat(
+                "destination root directory must not be a symlink".into(),
+            ));
+        }
+    }
+    let mut cur = dest_root.to_path_buf();
+    for comp in Path::new(rel_path).components() {
+        if let Component::Normal(part) = comp {
+            cur.push(part);
+            if let Ok(meta) = fs::symlink_metadata(&cur) {
+                if meta.file_type().is_symlink() {
+                    return Err(WilisError::InvalidFormat(format!(
+                        "refusing to extract through existing symlink at '{}'",
+                        cur.display()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Unpacks a verified `WDIR` v1 byte stream into `dest_dir`, returning extracted file count.
@@ -69,59 +143,79 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
             "WDIR file_count {file_count} exceeds safety limit ({MAX_ARCHIVE_FILES})"
         )));
     }
+    if let Ok(meta) = fs::symlink_metadata(dest_dir) {
+        if meta.file_type().is_symlink() {
+            return Err(WilisError::InvalidFormat(
+                "destination directory must not be a symlink".into(),
+            ));
+        }
+    }
     fs::create_dir_all(dest_dir)?;
 
     let mut copy_buf = [0u8; 64 * 1024];
-    for _ in 0..file_count {
-        let mut len_buf = [0u8; 4];
-        reader.read_exact(&mut len_buf).map_err(|_| {
-            WilisError::InvalidFormat("truncated WDIR path length".into())
-        })?;
-        let path_len = u32::from_le_bytes(len_buf) as usize;
-        if path_len == 0 || path_len > 4096 {
+    let mut seen_paths: HashSet<String> = HashSet::new();
+
+    let extract_res = (|| -> Result<()> {
+        for _ in 0..file_count {
+            let mut len_buf = [0u8; 4];
+            reader.read_exact(&mut len_buf).map_err(|_| {
+                WilisError::InvalidFormat("truncated WDIR path length".into())
+            })?;
+            let path_len = u32::from_le_bytes(len_buf) as usize;
+            if path_len == 0 || path_len > 4096 {
+                return Err(WilisError::InvalidFormat(
+                    "invalid WDIR entry path length".into(),
+                ));
+            }
+
+            let mut path_bytes = vec![0u8; path_len];
+            reader.read_exact(&mut path_bytes).map_err(|_| {
+                WilisError::InvalidFormat("truncated WDIR entry path".into())
+            })?;
+            let rel_path = String::from_utf8(path_bytes).map_err(|_| {
+                WilisError::InvalidEncoding("non-UTF-8 path in WDIR archive".into())
+            })?;
+
+            let target_path = sanitize_archive_path(dest_dir, &rel_path)?;
+            if !seen_paths.insert(rel_path.clone()) {
+                return Err(WilisError::InvalidFormat(format!(
+                    "duplicate entry path rejected in WDIR archive: '{rel_path}'"
+                )));
+            }
+            ensure_no_symlink_components(dest_dir, &rel_path)?;
+
+            let mut size_buf = [0u8; 8];
+            reader.read_exact(&mut size_buf).map_err(|_| {
+                WilisError::InvalidFormat("truncated WDIR file size".into())
+            })?;
+            let mut remaining = u64::from_le_bytes(size_buf);
+
+            if let Some(parent) = target_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            let mut out_file = File::create(&target_path)?;
+            while remaining > 0 {
+                let to_read = remaining.min(copy_buf.len() as u64) as usize;
+                reader.read_exact(&mut copy_buf[..to_read]).map_err(|_| {
+                    WilisError::InvalidFormat("truncated WDIR file payload".into())
+                })?;
+                out_file.write_all(&copy_buf[..to_read])?;
+                remaining -= to_read as u64;
+            }
+        }
+
+        // Strict canonical check: reject unexpected trailing garbage bytes
+        let mut trailing = [0u8; 1];
+        if reader.read(&mut trailing)? != 0 {
             return Err(WilisError::InvalidFormat(
-                "invalid WDIR entry path length".into(),
+                "unexpected trailing bytes after WDIR archive end".into(),
             ));
         }
-
-        let mut path_bytes = vec![0u8; path_len];
-        reader.read_exact(&mut path_bytes).map_err(|_| {
-            WilisError::InvalidFormat("truncated WDIR entry path".into())
-        })?;
-        let rel_path = String::from_utf8(path_bytes).map_err(|_| {
-            WilisError::InvalidEncoding("non-UTF-8 path in WDIR archive".into())
-        })?;
-
-        let target_path = sanitize_archive_path(dest_dir, &rel_path)?;
-
-        let mut size_buf = [0u8; 8];
-        reader.read_exact(&mut size_buf).map_err(|_| {
-            WilisError::InvalidFormat("truncated WDIR file size".into())
-        })?;
-        let mut remaining = u64::from_le_bytes(size_buf);
-
-        if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let mut out_file = File::create(&target_path)?;
-        while remaining > 0 {
-            let to_read = (remaining as usize).min(copy_buf.len());
-            reader.read_exact(&mut copy_buf[..to_read]).map_err(|_| {
-                WilisError::InvalidFormat("truncated WDIR file payload".into())
-            })?;
-            out_file.write_all(&copy_buf[..to_read])?;
-            remaining -= to_read as u64;
-        }
-    }
-
-    // Strict canonical check: reject unexpected trailing garbage bytes
-    let mut trailing = [0u8; 1];
-    if reader.read(&mut trailing)? != 0 {
-        return Err(WilisError::InvalidFormat(
-            "unexpected trailing bytes after WDIR archive end".into(),
-        ));
-    }
+        Ok(())
+    })();
+    zeroize_bytes(&mut copy_buf);
+    extract_res?;
 
     Ok(file_count)
 }

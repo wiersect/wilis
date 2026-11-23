@@ -79,7 +79,7 @@ impl KdfParams {
 
     /// Returns the total scratchpad memory size in bytes.
     pub fn memory_bytes(&self) -> usize {
-        self.memory_blocks as usize * STATE_BYTES
+        (self.memory_blocks as usize).saturating_mul(STATE_BYTES)
     }
 
     /// Validates that parameters are within safe, non-degenerate bounds.

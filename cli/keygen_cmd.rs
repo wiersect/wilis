@@ -34,13 +34,22 @@ pub fn run_hash_file(path: &str) -> Result<()> {
     let mut hasher = WilisHash::new();
     let mut buf = [0u8; 64 * 1024];
 
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
+    let read_res = (|| -> Result<()> {
+        loop {
+            let n = match file.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            };
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
         }
-        hasher.update(&buf[..n]);
-    }
+        Ok(())
+    })();
+    zeroize_bytes(&mut buf);
+    read_res?;
 
     println!("{}  {}", encode_hex(&hasher.finalize()), path);
     Ok(())
