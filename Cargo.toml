@@ -1,0 +1,29 @@
+[package]
+name = "wilis"
+version = "0.2.0"
+edition = "2021"
+authors = ["Wies <277550510+wiersect@users.noreply.github.com>"]
+description = "A standalone, zero-dependency custom cryptographic suite built from scratch on the WilisPerm-384 duplex sponge permutation."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/wiersect/wilis"
+homepage = "https://github.com/wiersect/wilis"
+keywords = ["cryptography", "aead", "sponge", "kdf", "zero-dependencies"]
+categories = ["cryptography", "command-line-utilities"]
+
+[lib]
+name = "wilis"
+path = "lib.rs"
+
+[[bin]]
+name = "wilis"
+path = "main.rs"
+
+[dependencies]
+# Intentionally empty: 100% custom implementation using only the Rust standard library.
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = false

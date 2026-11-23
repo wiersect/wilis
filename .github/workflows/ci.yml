@@ -1,0 +1,42 @@
+name: Wilis CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Test, Release Build & Cryptanalysis Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify zero external dependencies
+        run: |
+          if awk '/^\[dependencies\]/{in_dep=1; next} /^\[/{in_dep=0} in_dep && /^[a-zA-Z0-9_-]+[[:space:]]*=/{print; found=1} END{exit found}' Cargo.toml; then
+            echo "Verified: 0 external crate dependencies."
+          else
+            echo "Error: External crate dependencies are forbidden in Wilis!"
+            exit 1
+          fi
+
+      - name: Run full test suite (17 cryptographic & security tests)
+        run: cargo test --verbose
+
+      - name: Build optimized release binary
+        run: cargo build --release
+
+      - name: Run scientific cryptanalysis audit
+        run: ./target/release/wilis audit
+
+      - name: Run self-test & throughput benchmark
+        run: ./target/release/wilis bench
