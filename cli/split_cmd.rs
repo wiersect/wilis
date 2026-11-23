@@ -17,7 +17,10 @@ pub fn run_split_key(secret_hex: &str, total: u8, threshold: u8) -> Result<()> {
         "Split {secret_len}-byte secret into {total} shares (threshold k={threshold}):"
     );
     for share in &shares {
-        println!("  Share {:02}/{:02}: {}", share.index, total, share.encode_string());
+        let mut token = share.encode_string();
+        println!("  Share {:02}/{:02}: {}", share.index, total, token);
+        // SAFETY: Overwriting UTF-8 share token bytes with 0x00 preserves UTF-8 validity.
+        zeroize_bytes(unsafe { token.as_bytes_mut() });
     }
     Ok(())
 }
@@ -30,8 +33,10 @@ pub fn run_combine_key(share_tokens: &[String]) -> Result<()> {
     }
 
     let mut recovered = combine_shares(&shares)?;
-    let hex_out = encode_hex(&recovered);
+    let mut hex_out = encode_hex(&recovered);
     zeroize_bytes(&mut recovered);
     println!("{hex_out}");
+    // SAFETY: Overwriting UTF-8 hex bytes with 0x00 preserves UTF-8 validity.
+    zeroize_bytes(unsafe { hex_out.as_bytes_mut() });
     Ok(())
 }

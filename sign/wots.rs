@@ -63,6 +63,9 @@ pub fn derive_wots_secret_elem(
 }
 
 /// Evaluates `steps` tweaked WOTS+ hash chain iterations starting at `start_step`.
+///
+/// # Panics
+/// Panics if `start_step + steps > WOTS_MAX_STEP` (15).
 pub fn wots_chain(
     mut value: [u8; HASH_BYTES],
     start_step: u8,
@@ -71,13 +74,19 @@ pub fn wots_chain(
     leaf_idx: u32,
     chain_idx: u16,
 ) -> [u8; HASH_BYTES] {
-    for step in start_step..(start_step + steps) {
+    let end_step = (start_step as u16) + (steps as u16);
+    assert!(
+        end_step <= WOTS_MAX_STEP as u16,
+        "wots_chain step range {start_step}..{end_step} exceeds WOTS_MAX_STEP ({WOTS_MAX_STEP})"
+    );
+    for step in (start_step as u16)..end_step {
+        let step_u8 = step as u8;
         let mut h_mask = WilisHash::new();
         h_mask.update(b"WSIG_BM1");
         h_mask.update(pub_seed);
         h_mask.update(&leaf_idx.to_le_bytes());
         h_mask.update(&chain_idx.to_le_bytes());
-        h_mask.update(&[step]);
+        h_mask.update(&[step_u8]);
         let bitmask = h_mask.finalize();
 
         let mut h_key = WilisHash::new();
@@ -85,7 +94,7 @@ pub fn wots_chain(
         h_key.update(pub_seed);
         h_key.update(&leaf_idx.to_le_bytes());
         h_key.update(&chain_idx.to_le_bytes());
-        h_key.update(&[step]);
+        h_key.update(&[step_u8]);
         let key = h_key.finalize();
 
         let mut masked = [0u8; HASH_BYTES];

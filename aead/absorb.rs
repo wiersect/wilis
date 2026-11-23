@@ -3,6 +3,7 @@
 use crate::core::constants::{DOMAIN_AAD, RATE_BYTES, ROUNDS_DATA};
 use crate::core::permute::permute;
 use crate::core::state::State;
+use crate::utils::zeroize::zeroize_bytes;
 
 /// Absorbs arbitrary-length Associated Data into the sponge state.
 ///
@@ -23,6 +24,7 @@ pub fn absorb_aad(state: &mut State, aad: &[u8]) {
         padded[..rem.len()].copy_from_slice(rem);
         padded[rem.len()] = 0x80;
         state.xor_rate_block(&padded);
+        zeroize_bytes(&mut padded);
         permute(state, ROUNDS_DATA);
     }
 

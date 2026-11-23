@@ -1,6 +1,7 @@
 //! Pure-Rust standard Base64 (RFC 4648) encoder and decoder.
 
-use crate::error::{WilisError, Result};
+use crate::error::{Result, WilisError};
+use crate::utils::zeroize::zeroize_bytes;
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -38,11 +39,17 @@ pub fn encode_base64(input: &[u8]) -> String {
 
 /// Decodes standard Base64 text (ignoring ASCII whitespace) into raw bytes.
 pub fn decode_base64(input: &str) -> Result<Vec<u8>> {
-    let filtered: Vec<u8> = input
+    let mut filtered: Vec<u8> = input
         .bytes()
         .filter(|b| !b.is_ascii_whitespace())
         .collect();
 
+    let res = decode_base64_filtered(&filtered);
+    zeroize_bytes(&mut filtered);
+    res
+}
+
+fn decode_base64_filtered(filtered: &[u8]) -> Result<Vec<u8>> {
     if filtered.is_empty() {
         return Ok(Vec::new());
     }
@@ -61,29 +68,65 @@ pub fn decode_base64(input: &str) -> Result<Vec<u8>> {
         let pad_count = chunk.iter().filter(|&&b| b == b'=').count();
 
         if pad_count > 0 && !is_last {
+            zeroize_bytes(&mut out);
             return Err(WilisError::InvalidEncoding(
                 "unexpected '=' padding before final Base64 block".to_string(),
             ));
         }
 
         if pad_count > 2 || (pad_count == 1 && chunk[3] != b'=') || (pad_count == 2 && (chunk[2] != b'=' || chunk[3] != b'=')) {
+            zeroize_bytes(&mut out);
             return Err(WilisError::InvalidEncoding(
                 "malformed Base64 padding".to_string(),
             ));
         }
 
-        let v0 = decode_symbol(chunk[0])? as u32;
-        let v1 = decode_symbol(chunk[1])? as u32;
-        let v2 = if chunk[2] == b'=' { 0 } else { decode_symbol(chunk[2])? as u32 };
-        let v3 = if chunk[3] == b'=' { 0 } else { decode_symbol(chunk[3])? as u32 };
+        let v0 = match decode_symbol(chunk[0]) {
+            Ok(v) => v as u32,
+            Err(e) => {
+                zeroize_bytes(&mut out);
+                return Err(e);
+            }
+        };
+        let v1 = match decode_symbol(chunk[1]) {
+            Ok(v) => v as u32,
+            Err(e) => {
+                zeroize_bytes(&mut out);
+                return Err(e);
+            }
+        };
+        let v2 = if chunk[2] == b'=' {
+            0
+        } else {
+            match decode_symbol(chunk[2]) {
+                Ok(v) => v as u32,
+                Err(e) => {
+                    zeroize_bytes(&mut out);
+                    return Err(e);
+                }
+            }
+        };
+        let v3 = if chunk[3] == b'=' {
+            0
+        } else {
+            match decode_symbol(chunk[3]) {
+                Ok(v) => v as u32,
+                Err(e) => {
+                    zeroize_bytes(&mut out);
+                    return Err(e);
+                }
+            }
+        };
 
         // Enforce strict RFC 4648 canonical zero trailing padding bits (blocks malleability)
         if pad_count == 2 && (v1 & 0x0F) != 0 {
+            zeroize_bytes(&mut out);
             return Err(WilisError::InvalidEncoding(
                 "non-canonical Base64 padding bits (expected low 4 bits to be zero)".to_string(),
             ));
         }
         if pad_count == 1 && (v2 & 0x03) != 0 {
+            zeroize_bytes(&mut out);
             return Err(WilisError::InvalidEncoding(
                 "non-canonical Base64 padding bits (expected low 2 bits to be zero)".to_string(),
             ));

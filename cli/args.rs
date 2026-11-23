@@ -1,4 +1,4 @@
-//! Command-line argument parser and help text definitions for Wilis v0.4.2.
+//! Command-line argument parser and help text definitions for Wilis v0.4.3.
 
 use crate::core::constants::{HASH_BYTES, KEY_BYTES};
 use crate::error::{Result, WilisError};
@@ -56,15 +56,24 @@ impl Drop for VaultAction {
     }
 }
 
+/// Internal RAII wrapper ensuring parsed CLI secrets are always volatile-zeroized on early `?` returns.
+struct ZeroizeStr(String);
+
+impl ZeroizeStr {
+    fn into_inner(mut self) -> String {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for ZeroizeStr {
+    fn drop(&mut self) {
+        zeroize_string(&mut self.0);
+    }
+}
+
 fn zeroize_string(s: &mut String) {
     // SAFETY: Overwriting UTF-8 bytes with 0x00 preserves UTF-8 validity.
     zeroize_bytes(unsafe { s.as_bytes_mut() });
-}
-
-fn zeroize_opt_string(opt: &mut Option<String>) {
-    if let Some(s) = opt.as_mut() {
-        zeroize_string(s);
-    }
 }
 
 /// Parsed CLI subcommands.
@@ -290,7 +299,7 @@ fn parse_raw_key(hex_str: &str) -> Result<SecretKey> {
 }
 
 fn resolve_auth(
-    mut pass: Option<String>,
+    pass: Option<ZeroizeStr>,
     pass_prompt: bool,
     raw_key: Option<SecretKey>,
     keyfile_path: Option<String>,
@@ -299,7 +308,6 @@ fn resolve_auth(
 ) -> Result<AuthInput> {
     if let Some(key) = raw_key {
         if pass.is_some() || pass_prompt {
-            zeroize_opt_string(&mut pass);
             return Err(WilisError::CliUsage(
                 "cannot combine --key with --pass or --pass-prompt".into(),
             ));
@@ -313,7 +321,6 @@ fn resolve_auth(
     }
 
     if pass.is_some() && pass_prompt {
-        zeroize_opt_string(&mut pass);
         return Err(WilisError::CliUsage(
             "cannot combine --pass with --pass-prompt".into(),
         ));
@@ -321,13 +328,14 @@ fn resolve_auth(
 
     let mut passphrase = if pass_prompt {
         read_hidden_passphrase("Enter passphrase: ", is_encrypt)?
-    } else if let Some(p) = pass.take() {
-        if p.is_empty() {
+    } else if let Some(p) = pass {
+        let s = p.into_inner();
+        if s.is_empty() {
             return Err(WilisError::InvalidKey(
                 "passphrase must not be empty".into(),
             ));
         }
-        p
+        s
     } else {
         return Err(WilisError::CliUsage(
             "must specify --pass <PASS>, --pass-prompt, or --key <64-HEX>".into(),
@@ -353,7 +361,7 @@ fn resolve_auth(
 }
 
 fn parse_text_cmd(args: &[String], encrypt: bool) -> Result<Command> {
-    let mut pass: Option<String> = None;
+    let mut pass: Option<ZeroizeStr> = None;
     let mut pass_prompt = false;
     let mut raw_key: Option<SecretKey> = None;
     let mut keyfile: Option<String> = None;
@@ -374,8 +382,7 @@ fn parse_text_cmd(args: &[String], encrypt: bool) -> Result<Command> {
                 }
                 "--pass" => {
                     i += 1;
-                    zeroize_opt_string(&mut pass);
-                    pass = Some(req_val(args, i, "--pass")?);
+                    pass = Some(ZeroizeStr(req_val(args, i, "--pass")?));
                     i += 1;
                     continue;
                 }
@@ -409,14 +416,12 @@ fn parse_text_cmd(args: &[String], encrypt: bool) -> Result<Command> {
                     continue;
                 }
                 other if other.starts_with("--") => {
-                    zeroize_opt_string(&mut pass);
                     return Err(WilisError::CliUsage(format!("unknown option '{other}'")));
                 }
                 _ => {}
             }
         }
         if positional.is_some() {
-            zeroize_opt_string(&mut pass);
             return Err(WilisError::CliUsage(
                 "unexpected extra positional argument".into(),
             ));
@@ -425,17 +430,13 @@ fn parse_text_cmd(args: &[String], encrypt: bool) -> Result<Command> {
         i += 1;
     }
 
-    let payload = match positional {
-        Some(p) => p,
-        None => {
-            zeroize_opt_string(&mut pass);
-            return Err(WilisError::CliUsage(if encrypt {
-                "missing <PLAINTEXT> argument".into()
-            } else {
-                "missing <BASE64> ciphertext argument".into()
-            }));
-        }
-    };
+    let payload = positional.ok_or_else(|| {
+        WilisError::CliUsage(if encrypt {
+            "missing <PLAINTEXT> argument".into()
+        } else {
+            "missing <BASE64> ciphertext argument".into()
+        })
+    })?;
 
     let auth = resolve_auth(pass, pass_prompt, raw_key, keyfile, strength, encrypt)?;
     if encrypt {
@@ -454,7 +455,7 @@ fn parse_text_cmd(args: &[String], encrypt: bool) -> Result<Command> {
 }
 
 fn parse_io_cmd(args: &[String], mode: IoMode) -> Result<Command> {
-    let mut pass: Option<String> = None;
+    let mut pass: Option<ZeroizeStr> = None;
     let mut pass_prompt = false;
     let mut raw_key: Option<SecretKey> = None;
     let mut keyfile: Option<String> = None;
@@ -468,8 +469,7 @@ fn parse_io_cmd(args: &[String], mode: IoMode) -> Result<Command> {
         match args[i].as_str() {
             "--pass" => {
                 i += 1;
-                zeroize_opt_string(&mut pass);
-                pass = Some(req_val(args, i, "--pass")?);
+                pass = Some(ZeroizeStr(req_val(args, i, "--pass")?));
             }
             "--pass-prompt" => pass_prompt = true,
             "--key" => {
@@ -497,27 +497,16 @@ fn parse_io_cmd(args: &[String], mode: IoMode) -> Result<Command> {
                 output_path = Some(req_val(args, i, "--out")?);
             }
             other => {
-                zeroize_opt_string(&mut pass);
                 return Err(WilisError::CliUsage(format!("unknown argument '{other}'")));
             }
         }
         i += 1;
     }
 
-    let input_path = match input_path {
-        Some(p) => p,
-        None => {
-            zeroize_opt_string(&mut pass);
-            return Err(WilisError::CliUsage("missing required --in <PATH>".into()));
-        }
-    };
-    let output_path = match output_path {
-        Some(p) => p,
-        None => {
-            zeroize_opt_string(&mut pass);
-            return Err(WilisError::CliUsage("missing required --out <PATH>".into()));
-        }
-    };
+    let input_path =
+        input_path.ok_or_else(|| WilisError::CliUsage("missing required --in <PATH>".into()))?;
+    let output_path =
+        output_path.ok_or_else(|| WilisError::CliUsage("missing required --out <PATH>".into()))?;
 
     let is_encrypt = matches!(mode, IoMode::EncryptFile | IoMode::EncryptDir);
     let auth = resolve_auth(pass, pass_prompt, raw_key, keyfile, strength, is_encrypt)?;
@@ -649,12 +638,12 @@ fn parse_vault_cmd(args: &[String]) -> Result<Command> {
     }
     let sub = args[0].as_str();
     let mut vault_file: Option<String> = None;
-    let mut pass: Option<String> = None;
+    let mut pass: Option<ZeroizeStr> = None;
     let mut pass_prompt = false;
     let mut keyfile: Option<String> = None;
     let mut strength = KdfStrength::Interactive;
     let mut name: Option<String> = None;
-    let mut value: Option<String> = None;
+    let mut value: Option<ZeroizeStr> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -665,8 +654,7 @@ fn parse_vault_cmd(args: &[String]) -> Result<Command> {
             }
             "--pass" => {
                 i += 1;
-                zeroize_opt_string(&mut pass);
-                pass = Some(req_val(args, i, "--pass")?);
+                pass = Some(ZeroizeStr(req_val(args, i, "--pass")?));
             }
             "--pass-prompt" => pass_prompt = true,
             "--keyfile" => {
@@ -683,85 +671,44 @@ fn parse_vault_cmd(args: &[String]) -> Result<Command> {
             }
             "--value" => {
                 i += 1;
-                zeroize_opt_string(&mut value);
-                value = Some(req_val(args, i, "--value")?);
+                value = Some(ZeroizeStr(req_val(args, i, "--value")?));
             }
             other => {
-                zeroize_opt_string(&mut pass);
-                zeroize_opt_string(&mut value);
                 return Err(WilisError::CliUsage(format!("unknown vault option '{other}'")));
             }
         }
         i += 1;
     }
 
-    let vault_path = match vault_file {
-        Some(p) => p,
-        None => {
-            zeroize_opt_string(&mut pass);
-            zeroize_opt_string(&mut value);
-            return Err(WilisError::CliUsage(
-                "missing required --file <VAULT.wils>".into(),
-            ));
-        }
-    };
+    let vault_path = vault_file
+        .ok_or_else(|| WilisError::CliUsage("missing required --file <VAULT.wils>".into()))?;
     let action = match sub {
         "init" => {
             if name.is_some() || value.is_some() {
-                zeroize_opt_string(&mut pass);
-                zeroize_opt_string(&mut value);
                 return Err(WilisError::CliUsage(
                     "vault init does not accept --name or --value".into(),
                 ));
             }
             VaultAction::Init
         }
-        "set" => {
-            let k = match name {
-                Some(n) => n,
-                None => {
-                    zeroize_opt_string(&mut pass);
-                    zeroize_opt_string(&mut value);
-                    return Err(WilisError::CliUsage(
-                        "vault set requires --name <KEY>".into(),
-                    ));
-                }
-            };
-            let v = match value.take() {
-                Some(v) => v,
-                None => {
-                    zeroize_opt_string(&mut pass);
-                    return Err(WilisError::CliUsage(
-                        "vault set requires --value <VAL>".into(),
-                    ));
-                }
-            };
-            VaultAction::Set { name: k, value: v }
-        }
+        "set" => VaultAction::Set {
+            name: name.ok_or_else(|| WilisError::CliUsage("vault set requires --name <KEY>".into()))?,
+            value: value
+                .ok_or_else(|| WilisError::CliUsage("vault set requires --value <VAL>".into()))?
+                .into_inner(),
+        },
         "get" => {
             if value.is_some() {
-                zeroize_opt_string(&mut pass);
-                zeroize_opt_string(&mut value);
                 return Err(WilisError::CliUsage(
                     "vault get does not accept --value".into(),
                 ));
             }
             VaultAction::Get {
-                name: match name {
-                    Some(n) => n,
-                    None => {
-                        zeroize_opt_string(&mut pass);
-                        return Err(WilisError::CliUsage(
-                            "vault get requires --name <KEY>".into(),
-                        ));
-                    }
-                },
+                name: name.ok_or_else(|| WilisError::CliUsage("vault get requires --name <KEY>".into()))?,
             }
         }
         "list" => {
             if name.is_some() || value.is_some() {
-                zeroize_opt_string(&mut pass);
-                zeroize_opt_string(&mut value);
                 return Err(WilisError::CliUsage(
                     "vault list does not accept --name or --value".into(),
                 ));
@@ -770,27 +717,15 @@ fn parse_vault_cmd(args: &[String]) -> Result<Command> {
         }
         "del" | "delete" | "rm" => {
             if value.is_some() {
-                zeroize_opt_string(&mut pass);
-                zeroize_opt_string(&mut value);
                 return Err(WilisError::CliUsage(
                     "vault del does not accept --value".into(),
                 ));
             }
             VaultAction::Delete {
-                name: match name {
-                    Some(n) => n,
-                    None => {
-                        zeroize_opt_string(&mut pass);
-                        return Err(WilisError::CliUsage(
-                            "vault del requires --name <KEY>".into(),
-                        ));
-                    }
-                },
+                name: name.ok_or_else(|| WilisError::CliUsage("vault del requires --name <KEY>".into()))?,
             }
         }
         other => {
-            zeroize_opt_string(&mut pass);
-            zeroize_opt_string(&mut value);
             return Err(WilisError::CliUsage(format!(
                 "unknown vault subcommand '{other}' (expected: init, set, get, list, del)"
             )));

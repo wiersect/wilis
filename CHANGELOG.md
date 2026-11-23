@@ -2,6 +2,15 @@
 
 All notable changes to **Wilis** are documented in this file.
 
+## [0.4.3] - 2026-11-23
+
+### Bug Fixes, Python FFI Hardening & Locked Known-Answer Test Vectors (Round 3)
+- **WOTS+ Step Overflow Guard (`sign/wots.rs`)**: Prevented silent `u8` addition wrap-around in `wots_chain` by computing bounds in `u16` and asserting `start_step + steps <= WOTS_MAX_STEP` (`15`).
+- **Python Binding Hardening (`bindings/python/wilis_py.py`)**: Added strict `0..=0xFFFF_FFFF` `u32` bounds checks in `kdf_derive` (preventing silent `ctypes.c_uint32` wrap-around that could weaken KDF work factors on out-of-range ints), added `try ... finally: ctypes.memset(...)` zeroization for all temporary ctypes secret buffers (`key`, `passphrase`, `sk`, `pt`, `ss`), added constant-time `mac_verify` (`hmac.compare_digest`), and expanded `__main__` self-tests.
+- **Panic-Free `ContainerHeader::to_bytes` (`format/header.rs`)**: Replaced `.expect(...)` when `version == FORMAT_VERSION_V2` and `chunk_size == None` with safe `DEFAULT_CHUNK_SIZE` fallback.
+- **RAII Secret Zeroization & Buffer Wiping (`cli/args.rs`, `cli/split_cmd.rs`, `utils/base64.rs`, `aead/absorb.rs`)**: Replaced manual passphrase/vault-value cleanup with an RAII `ZeroizeStr` wrapper so even `?` early returns wipe parsed CLI secrets; zeroized Base64 decode scratch & partial output buffers on error, `split-key`/`combine-key` formatted secret strings, and `absorb_aad` padded block.
+- **Locked Known-Answer Test Vectors (`tests/known_answer_vectors.rs`)**: Verified all 32 `ROUND_CONSTANTS` mathematically match `floor(2^64 * frac(p_i^(1/5)))` (32/32 exact) and locked permanent golden KAT vectors for `WilisPerm-384`, `WilisHash-256`, `WilisXOF`, `WilisMAC`/`derive_subkey`, `WilisAEAD`, `WilisKDF` v2 (with & without 2FA keyfile), `WilisKEM`, `WilisSign`, and `WilisRatchet` (**38 / 38 tests**).
+
 ## [0.4.2] - 2026-11-23
 
 ### Bug Fixes & Deep Audit Pass (Round 2)

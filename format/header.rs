@@ -6,7 +6,7 @@ use std::io::Read;
 use crate::core::constants::{NONCE_BYTES, SALT_BYTES};
 use crate::error::{Result, WilisError};
 use crate::kdf::KdfParams;
-use crate::stream::chunk_nonce::{MAX_CHUNK_SIZE, MIN_CHUNK_SIZE};
+use crate::stream::chunk_nonce::{DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE};
 
 /// Four-byte ASCII magic header identifying a Wilis container.
 pub const MAGIC_BYTES: [u8; 4] = *b"WILS";
@@ -61,7 +61,7 @@ impl ContainerHeader {
         out.extend_from_slice(&self.nonce);
 
         if self.version == FORMAT_VERSION_V2 {
-            let cs = self.chunk_size.expect("v2 header must carry chunk_size");
+            let cs = self.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
             out.extend_from_slice(&cs.to_le_bytes());
         }
 
