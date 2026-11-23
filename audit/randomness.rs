@@ -22,6 +22,23 @@ pub struct RandomnessMetrics {
 /// Generates `sample_bytes` of raw `WilisAEAD` keystream (encrypting all-zero plaintext)
 /// and runs 5 independent statistical randomness tests.
 pub fn analyze_keystream_randomness(sample_bytes: usize) -> RandomnessMetrics {
+    if sample_bytes < 256 {
+        return RandomnessMetrics {
+            sample_bytes,
+            ones_ratio: 0.0,
+            monobit_pass: false,
+            runs_z_score: f64::INFINITY,
+            runs_pass: false,
+            shannon_entropy_bits_per_byte: 0.0,
+            entropy_pass: false,
+            chi_squared: f64::INFINITY,
+            chi_squared_pass: false,
+            max_autocorr_lag1_16: 1.0,
+            autocorr_pass: false,
+            all_passed: false,
+        };
+    }
+
     let key = [0x3Cu8; 32];
     let nonce = [0x91u8; 24];
     let zeros = vec![0u8; sample_bytes];

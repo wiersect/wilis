@@ -1,11 +1,12 @@
 //! CLI handlers for post-quantum `WilisSign`: `sign-keygen`, `sign`, and `verify`.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Result, WilisError};
 use crate::hash::hash_hex;
 use crate::sign::{Signature, SigningKey, VerifyingKey};
+use crate::utils::zeroize::{paths_refer_to_same_file, write_secret_file, zeroize_bytes};
 
 /// Generates a post-quantum `WilisSign` Merkle keypair and writes `<prefix>.wsk` & `<prefix>.wpk`.
 pub fn run_sign_keygen(out_prefix: &str, height: u8) -> Result<()> {
@@ -13,12 +14,20 @@ pub fn run_sign_keygen(out_prefix: &str, height: u8) -> Result<()> {
     let sk_path = format!("{out_prefix}.wsk");
     let pk_path = format!("{out_prefix}.wpk");
 
-    fs::write(&sk_path, sk.to_bytes())?;
-    fs::write(&pk_path, pk.to_bytes())?;
+    let mut sk_bytes = sk.to_bytes();
+    let write_sk = write_secret_file(Path::new(&sk_path), &sk_bytes);
+    zeroize_bytes(&mut sk_bytes);
+    write_sk?;
 
-    let pk_id = &hash_hex(&pk.to_bytes())[..32];
+    let pk_bytes = pk.to_bytes();
+    fs::write(&pk_path, &pk_bytes)?;
+
+    let pk_id = &hash_hex(&pk_bytes)[..32];
     println!("Generated Post-Quantum WilisSign Keypair (WOTS+ Merkle Tree, height={height})");
-    println!("  Secret key : {sk_path} (KEEP PRIVATE — stateful, {} signatures available)", sk.max_signatures());
+    println!(
+        "  Secret key : {sk_path} (KEEP PRIVATE, mode 0600 on Unix — stateful, {} signatures available)",
+        sk.max_signatures()
+    );
     println!("  Public key : {pk_path}");
     println!("  Public ID  : {pk_id}");
     Ok(())
@@ -26,18 +35,38 @@ pub fn run_sign_keygen(out_prefix: &str, height: u8) -> Result<()> {
 
 /// Signs a file with a `WSK1` secret key, atomically advancing the stateful leaf counter.
 pub fn run_sign_file(sk_path: &str, input_path: &str, sig_out_path: &str) -> Result<()> {
-    let sk_bytes = fs::read(sk_path)?;
-    let mut sk = SigningKey::from_bytes(&sk_bytes)?;
-    let message = fs::read(input_path)?;
+    let sk_p = Path::new(sk_path);
+    let in_p = Path::new(input_path);
+    let out_p = Path::new(sig_out_path);
+    if paths_refer_to_same_file(in_p, out_p) || paths_refer_to_same_file(sk_p, out_p) {
+        return Err(WilisError::InvalidParameters(
+            "signature output path must not overwrite the input file or secret key".into(),
+        ));
+    }
 
+    let mut sk_bytes = fs::read(sk_p)?;
+    let sk_res = SigningKey::from_bytes(&sk_bytes);
+    zeroize_bytes(&mut sk_bytes);
+    let mut sk = sk_res?;
+
+    let message = fs::read(in_p)?;
     let sig = sk.sign(&message)?;
 
-    // Atomically persist updated secret key BEFORE writing the signature to avoid leaf reuse
-    let mut tmp_os = Path::new(sk_path).as_os_str().to_os_string();
+    // Atomically persist updated secret key with 0600 mode BEFORE writing the signature
+    let mut tmp_os = sk_p.as_os_str().to_os_string();
     tmp_os.push(".tmp");
-    let tmp_sk = std::path::PathBuf::from(tmp_os);
-    fs::write(&tmp_sk, sk.to_bytes())?;
-    fs::rename(&tmp_sk, sk_path)?;
+    let tmp_sk = PathBuf::from(tmp_os);
+    let mut updated_sk_bytes = sk.to_bytes();
+    let write_res = write_secret_file(&tmp_sk, &updated_sk_bytes);
+    zeroize_bytes(&mut updated_sk_bytes);
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&tmp_sk);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp_sk, sk_p) {
+        let _ = fs::remove_file(&tmp_sk);
+        return Err(e.into());
+    }
 
     let sig_bytes = sig.to_bytes();
     fs::write(sig_out_path, &sig_bytes)?;

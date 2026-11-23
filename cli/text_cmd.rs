@@ -7,6 +7,7 @@ use crate::format::{
     encrypt_with_passphrase_and_keyfile,
 };
 use crate::utils::base64::{decode_base64, encode_base64};
+use crate::utils::zeroize::zeroize_bytes;
 
 /// Encrypts UTF-8 text and prints the Base64-encoded `WILS` container.
 pub fn run_encrypt(auth: AuthInput, aad: &str, plaintext: &str) -> Result<()> {
@@ -48,9 +49,13 @@ pub fn run_decrypt(auth: AuthInput, aad: &str, ciphertext_b64: &str) -> Result<(
         AuthInput::RawKey(key) => decrypt_with_key(key.as_bytes(), &container, aad.as_bytes())?,
     };
 
-    let text = String::from_utf8(plaintext).map_err(|_| {
+    let mut text = String::from_utf8(plaintext).map_err(|err| {
+        let mut raw = err.into_bytes();
+        zeroize_bytes(&mut raw);
         WilisError::InvalidEncoding("decrypted payload is not valid UTF-8 text".to_string())
     })?;
     println!("{text}");
+    // SAFETY: Overwriting UTF-8 string bytes with 0x00 preserves UTF-8 validity.
+    zeroize_bytes(unsafe { text.as_bytes_mut() });
     Ok(())
 }

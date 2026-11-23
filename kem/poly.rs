@@ -5,6 +5,7 @@
 //! non-canonical ciphertext malleability.
 
 use crate::error::{Result, WilisError};
+use crate::utils::zeroize::zeroize_bytes;
 use crate::xof::WilisXof;
 
 /// Polynomial degree `N = 256`.
@@ -31,6 +32,17 @@ impl Poly {
         Self {
             coeffs: [0u16; KEM_N],
         }
+    }
+
+    /// Securely wipes all polynomial coefficients using volatile writes.
+    pub fn zeroize(&mut self) {
+        for c in &mut self.coeffs {
+            // SAFETY: `c` is a valid, aligned mutable `u16` reference within `self.coeffs`.
+            unsafe {
+                core::ptr::write_volatile(c as *mut u16, 0);
+            }
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
     /// Coefficient-wise addition modulo `q`.
@@ -176,6 +188,7 @@ impl Poly {
                 d1 as u16
             };
         }
+        zeroize_bytes(&mut raw);
         out
     }
 

@@ -1,5 +1,5 @@
 /*
- * Wilis v0.4.0 — C Foreign Function Interface Header
+ * Wilis v0.4.1 — C Foreign Function Interface Header
  * Standalone zero-dependency cryptography built on WilisPerm-384.
  */
 

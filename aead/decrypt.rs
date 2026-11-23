@@ -3,6 +3,7 @@
 use crate::core::constants::{DOMAIN_MSG, RATE_BYTES, ROUNDS_DATA};
 use crate::core::permute::permute;
 use crate::core::state::State;
+use crate::utils::zeroize::zeroize_bytes;
 
 /// Decrypts `ciphertext` in duplex sponge mode while updating `state` in place.
 ///
@@ -13,18 +14,20 @@ pub fn decrypt_blocks(state: &mut State, ciphertext: &[u8]) -> Vec<u8> {
 
     let mut plaintext = Vec::with_capacity(ciphertext.len());
     let mut chunks = ciphertext.chunks_exact(RATE_BYTES);
+    let mut p_block = [0u8; RATE_BYTES];
 
     for chunk in chunks.by_ref() {
-        let ks = state.rate_bytes();
+        let mut ks = state.rate_bytes();
         let c_block: &[u8; RATE_BYTES] = chunk.try_into().expect("16-byte ciphertext block");
-        let mut p_block = [0u8; RATE_BYTES];
         for i in 0..RATE_BYTES {
             p_block[i] = c_block[i] ^ ks[i];
         }
         plaintext.extend_from_slice(&p_block);
+        zeroize_bytes(&mut ks);
         state.set_rate_bytes(c_block);
         permute(state, ROUNDS_DATA);
     }
+    zeroize_bytes(&mut p_block);
 
     let rem = chunks.remainder();
     let mut rate = state.rate_bytes();
@@ -35,6 +38,7 @@ pub fn decrypt_blocks(state: &mut State, ciphertext: &[u8]) -> Vec<u8> {
     }
     rate[rem.len()] ^= 0x80;
     state.set_rate_bytes(&rate);
+    zeroize_bytes(&mut rate);
 
     plaintext
 }

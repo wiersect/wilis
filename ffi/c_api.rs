@@ -18,6 +18,7 @@ use crate::kem::{
 };
 use crate::mac::mac;
 use crate::utils::random::fill_random;
+use crate::utils::zeroize::zeroize_bytes;
 use crate::xof::WilisXof;
 
 pub const WILIS_OK: i32 = 0;
@@ -72,10 +73,11 @@ pub unsafe extern "C" fn wilis_mac_256(
         Some(s) => s,
         None => return WILIS_ERR_INVALID_ARG,
     };
-    let key: [u8; KEY_BYTES] = slice::from_raw_parts(key_32, KEY_BYTES)
+    let mut key: [u8; KEY_BYTES] = slice::from_raw_parts(key_32, KEY_BYTES)
         .try_into()
         .expect("32 bytes");
     let tag = mac(&key, input);
+    zeroize_bytes(&mut key);
     slice::from_raw_parts_mut(tag_32_out, TAG_BYTES).copy_from_slice(&tag);
     WILIS_OK
 }
@@ -144,7 +146,7 @@ pub unsafe extern "C" fn wilis_aead_seal(
         return WILIS_ERR_INVALID_ARG;
     }
 
-    let key: [u8; KEY_BYTES] = slice::from_raw_parts(key_32, KEY_BYTES)
+    let mut key: [u8; KEY_BYTES] = slice::from_raw_parts(key_32, KEY_BYTES)
         .try_into()
         .expect("32 bytes");
     let nonce: [u8; NONCE_BYTES] = slice::from_raw_parts(nonce_24, NONCE_BYTES)
@@ -152,6 +154,7 @@ pub unsafe extern "C" fn wilis_aead_seal(
         .expect("24 bytes");
 
     let (ct, tag) = seal(&key, &nonce, aad_slice, pt_slice);
+    zeroize_bytes(&mut key);
     if pt_len > 0 {
         slice::from_raw_parts_mut(ct_out, pt_len).copy_from_slice(&ct);
     }
@@ -189,7 +192,7 @@ pub unsafe extern "C" fn wilis_aead_open(
         return WILIS_ERR_INVALID_ARG;
     }
 
-    let key: [u8; KEY_BYTES] = slice::from_raw_parts(key_32, KEY_BYTES)
+    let mut key: [u8; KEY_BYTES] = slice::from_raw_parts(key_32, KEY_BYTES)
         .try_into()
         .expect("32 bytes");
     let nonce: [u8; NONCE_BYTES] = slice::from_raw_parts(nonce_24, NONCE_BYTES)
@@ -199,17 +202,20 @@ pub unsafe extern "C" fn wilis_aead_open(
         .try_into()
         .expect("32 bytes");
 
-    match open(&key, &nonce, aad_slice, ct_slice, &tag) {
-        Ok(pt) => {
+    let res = open(&key, &nonce, aad_slice, ct_slice, &tag);
+    zeroize_bytes(&mut key);
+    match res {
+        Ok(mut pt) => {
             if ct_len > 0 {
                 slice::from_raw_parts_mut(pt_out, ct_len).copy_from_slice(&pt);
             }
+            zeroize_bytes(&mut pt);
             WILIS_OK
         }
         Err(_) => {
             if ct_len > 0 {
                 let out_slice = slice::from_raw_parts_mut(pt_out, ct_len);
-                crate::utils::zeroize::zeroize_bytes(out_slice);
+                zeroize_bytes(out_slice);
             }
             WILIS_ERR_AUTH_FAILED
         }
@@ -265,7 +271,9 @@ pub unsafe extern "C" fn wilis_kem_keygen(pk_out: *mut u8, sk_out: *mut u8) -> i
     match keygen() {
         Ok((sk, pk)) => {
             slice::from_raw_parts_mut(pk_out, KEM_PK_BYTES).copy_from_slice(&pk.to_bytes());
-            slice::from_raw_parts_mut(sk_out, KEM_SK_BYTES).copy_from_slice(&sk.to_bytes());
+            let mut sk_bytes = sk.to_bytes();
+            slice::from_raw_parts_mut(sk_out, KEM_SK_BYTES).copy_from_slice(&sk_bytes);
+            zeroize_bytes(&mut sk_bytes);
             WILIS_OK
         }
         Err(_) => WILIS_ERR_INTERNAL,

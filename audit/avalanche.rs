@@ -79,8 +79,14 @@ pub fn analyze_avalanche_by_round() -> Vec<RoundAvalanche> {
 /// Flips 512 pseudo-random input trials on a fixed input bit and measures whether
 /// pairs of output bits `(i, j)` flip independently (ideal correlation = 0.0).
 pub fn analyze_bic(samples: usize) -> BicResult {
-    // Track 64 output bits (word 0) across `samples` trials
-    let mut flip_counts = [0i64; 64];
+    if samples == 0 {
+        return BicResult {
+            max_abs_correlation: 1.0,
+            avg_abs_correlation: 1.0,
+            passed: false,
+        };
+    }
+    // Track pairwise output bit agreement across `samples` trials (word 0 = 64 bits)
     let mut pair_agree = vec![0i64; 64 * 64];
 
     let mut seed = State::from_words([
@@ -107,7 +113,6 @@ pub fn analyze_bic(samples: usize) -> BicResult {
         let diff = out_a.words[0] ^ out_b.words[0];
         for i in 0..64 {
             let bi = ((diff >> i) & 1) as i64;
-            flip_counts[i] += bi;
             for j in (i + 1)..64 {
                 let bj = ((diff >> j) & 1) as i64;
                 if bi == bj {

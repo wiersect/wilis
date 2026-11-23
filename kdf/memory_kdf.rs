@@ -19,7 +19,7 @@ use crate::core::permute::permute;
 use crate::core::state::State;
 use crate::error::Result;
 use crate::kdf::params::KdfParams;
-use crate::utils::zeroize::{zeroize_u64_slice, SecretKey};
+use crate::utils::zeroize::{zeroize_bytes, zeroize_u64_slice, SecretKey};
 
 /// Deterministic non-secret index mixer for Pass 0 (avoids secret-dependent memory access).
 #[inline]
@@ -83,6 +83,7 @@ pub fn derive_key_with_keyfile(
     padded[..rem.len()].copy_from_slice(rem);
     padded[rem.len()] = 0x80;
     acc.xor_rate_block(&padded);
+    zeroize_bytes(&mut padded);
     permute(&mut acc, ROUNDS_FULL);
 
     // Optionally absorb 256-bit keyfile digest with domain separator
@@ -98,7 +99,6 @@ pub fn derive_key_with_keyfile(
     let mem_len = params.memory_blocks as usize;
     let mut table: Vec<[u64; STATE_WORDS]> = Vec::with_capacity(mem_len);
 
-    acc.words[0] ^= 0;
     permute(&mut acc, ROUNDS_DATA);
     table.push(acc.words);
 
@@ -148,10 +148,12 @@ pub fn derive_key_with_keyfile(
     permute(&mut acc, ROUNDS_FULL);
     key_bytes[RATE_BYTES..KEY_BYTES].copy_from_slice(&acc.rate_bytes());
 
-    // Zeroize the entire memory-hard scratchpad before releasing
+    // Zeroize the entire memory-hard scratchpad and stack key copy before releasing
     for slot in table.iter_mut() {
         zeroize_u64_slice(slot);
     }
 
-    Ok(SecretKey::from_bytes(key_bytes))
+    let secret_key = SecretKey::from_bytes(key_bytes);
+    zeroize_bytes(&mut key_bytes);
+    Ok(secret_key)
 }

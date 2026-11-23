@@ -7,6 +7,7 @@ use crate::core::constants::{DOMAIN_HASH, HASH_BYTES, RATE_BYTES, ROUNDS_DATA, R
 use crate::core::permute::permute;
 use crate::core::state::State;
 use crate::utils::hex::encode_hex;
+use crate::utils::zeroize::zeroize_bytes;
 
 /// Incremental sponge hasher producing a 256-bit (32-byte) digest.
 #[derive(Clone)]
@@ -66,6 +67,7 @@ impl WilisHash {
         padded[..self.buf_len].copy_from_slice(&self.buffer[..self.buf_len]);
         padded[self.buf_len] = 0x80;
         self.state.xor_rate_block(&padded);
+        zeroize_bytes(&mut padded);
         permute(&mut self.state, ROUNDS_FULL);
 
         let mut digest = [0u8; HASH_BYTES];
@@ -73,6 +75,12 @@ impl WilisHash {
         permute(&mut self.state, ROUNDS_FULL);
         digest[RATE_BYTES..HASH_BYTES].copy_from_slice(&self.state.rate_bytes());
         digest
+    }
+}
+
+impl Drop for WilisHash {
+    fn drop(&mut self) {
+        zeroize_bytes(&mut self.buffer);
     }
 }
 

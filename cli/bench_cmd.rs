@@ -6,7 +6,7 @@ use crate::aead::{open, seal};
 use crate::core::constants::{ROUNDS_FULL, STATE_WORDS};
 use crate::core::permute::{permute, permute_inverse};
 use crate::core::state::State;
-use crate::error::Result;
+use crate::error::{Result, WilisError};
 
 /// Runs a live diagnostic checking bijectivity, avalanche diffusion, and AEAD throughput.
 pub fn run_bench() -> Result<()> {
@@ -24,10 +24,16 @@ pub fn run_bench() -> Result<()> {
     let mut s = original.clone();
     permute(&mut s, ROUNDS_FULL);
     permute_inverse(&mut s, ROUNDS_FULL);
+    let bijective = s == original;
     println!(
         "[1/3] Bijectivity P^-1(P(x)) == x : {}",
-        if s == original { "PASS" } else { "FAIL" }
+        if bijective { "PASS" } else { "FAIL" }
     );
+    if !bijective {
+        return Err(WilisError::InvalidParameters(
+            "permutation bijectivity self-test failed".into(),
+        ));
+    }
 
     // 2. Strict Avalanche Criterion (flip every single bit across the 384-bit state)
     let mut base_out = original.clone();

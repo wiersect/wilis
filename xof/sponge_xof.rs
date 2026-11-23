@@ -30,8 +30,10 @@ impl WilisXof {
             buf_pos: 0,
             squeezing: false,
         };
+        // Always length-prefix the domain label (even when empty -> 0u64) so
+        // ("", seed) can never collide with (non_empty_label, seed2).
+        xof.absorb(&(domain_label.len() as u64).to_le_bytes());
         if !domain_label.is_empty() {
-            xof.absorb(&(domain_label.len() as u64).to_le_bytes());
             xof.absorb(domain_label);
         }
         xof

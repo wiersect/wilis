@@ -91,3 +91,121 @@ fn all_parsers_are_panic_free_on_adversarial_and_fuzz_inputs() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+
+#[test]
+fn regression_v041_audit_fixes_verified() {
+    use wilis::archive::encrypt_directory_with_key;
+    use wilis::audit::avalanche::analyze_bic;
+    use wilis::audit::randomness::analyze_keystream_randomness;
+    use wilis::cli::args::AuthInput;
+    use wilis::cli::file_cmd;
+    use wilis::error::WilisError;
+    use wilis::ratchet::RatchetSession;
+    use wilis::split::split_secret;
+    use wilis::utils::zeroize::SecretKey;
+
+    // 1. XOF empty-label vs non-empty-label collision fix
+    let mut forged_empty_seed = Vec::new();
+    forged_empty_seed.extend_from_slice(&4u64.to_le_bytes());
+    forged_empty_seed.extend_from_slice(b"ABCD");
+    forged_empty_seed.push(b'X');
+    let out_empty = WilisXof::derive(b"", &forged_empty_seed, 32);
+    let out_labeled = WilisXof::derive(b"ABCD", b"X", 32);
+    assert_ne!(
+        out_empty, out_labeled,
+        "empty XOF domain label must not collide with length-prefixed non-empty label"
+    );
+
+    // 2. Base64 non-canonical padding bits rejected
+    assert_eq!(decode_base64("AA==").unwrap(), vec![0x00]);
+    assert!(decode_base64("AB==").is_err()); // non-zero low 4 bits
+    assert_eq!(decode_base64("AAA=").unwrap(), vec![0x00, 0x00]);
+    assert!(decode_base64("AAB=").is_err()); // non-zero low 2 bits
+
+    // 3. Shamir share index > total rejected & extra corrupted backup share caught!
+    let mut bad_idx_share = split_secret(b"secret-32-byte-value-for-shamir!", 5, 3).unwrap();
+    let mut raw_s = bad_idx_share[0].to_bytes();
+    raw_s[5] = 99; // index = 99 > total = 5
+    assert!(Share::from_bytes(&raw_s).is_err());
+
+    // Tamper 4th share when combining 4 shares of a 3-of-5 split -> MUST reject!
+    bad_idx_share[3].data[0] ^= 0x01;
+    assert!(matches!(
+        combine_shares(&bad_idx_share[0..4]),
+        Err(WilisError::AuthenticationFailed)
+    ));
+
+    // 4. Ratchet u64::MAX counter packet cleanly rejected without overflow panic
+    let mut sess = RatchetSession::from_shared_secret(&[0x55; 32], false);
+    let max_pkt = RatchetPacket {
+        counter: u64::MAX,
+        ciphertext: vec![0; 8],
+        tag: [0; 32],
+    };
+    assert!(matches!(
+        sess.decrypt_packet(&max_pkt, b""),
+        Err(WilisError::AuthenticationFailed)
+    ));
+
+    // 5. Audit edge cases (samples=0, sample_bytes=0) never panic or produce NaN pass
+    assert!(!analyze_bic(0).passed);
+    assert!(!analyze_keystream_randomness(0).all_passed);
+    assert!(!analyze_keystream_randomness(10).all_passed);
+
+    // 6. CLI file_cmd blocks --in == --out AND preserves existing --out on wrong key!
+    let base = std::env::temp_dir().join(format!("wilis_v041_reg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let src = base.join("orig.bin");
+    let enc = base.join("orig.wils");
+    let existing = base.join("precious.txt");
+    std::fs::write(&src, b"original-data").unwrap();
+    std::fs::write(&existing, b"DO-NOT-CLOBBER").unwrap();
+
+    // Same-file in-place encryption must fail without truncating src
+    assert!(file_cmd::run_encrypt(
+        AuthInput::RawKey(SecretKey::from_bytes([0x11; 32])),
+        "",
+        src.to_str().unwrap(),
+        src.to_str().unwrap(),
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&src).unwrap(), b"original-data");
+
+    // Encrypt cleanly, then attempt decrypt onto `existing` with WRONG key -> `existing` preserved!
+    file_cmd::run_encrypt(
+        AuthInput::RawKey(SecretKey::from_bytes([0x11; 32])),
+        "",
+        src.to_str().unwrap(),
+        enc.to_str().unwrap(),
+    )
+    .unwrap();
+    assert!(file_cmd::run_decrypt(
+        AuthInput::RawKey(SecretKey::from_bytes([0x22; 32])),
+        "",
+        enc.to_str().unwrap(),
+        existing.to_str().unwrap(),
+    )
+    .is_err());
+    assert_eq!(
+        std::fs::read(&existing).unwrap(),
+        b"DO-NOT-CLOBBER",
+        "failed decrypt must not overwrite existing file at --out"
+    );
+
+    // 7. WilisDir refuses placing output archive inside source directory
+    let inside_out = base.join("inside.wils");
+    assert!(encrypt_directory_with_key(&[0x11; 32], &base, &inside_out, b"").is_err());
+
+    // 8. SigningKey rejects corrupted next_index > 2^height
+    let (sk, _) = SigningKey::generate(2).unwrap();
+    let mut sk_raw = sk.to_bytes();
+    sk_raw[5..9].copy_from_slice(&999u32.to_le_bytes());
+    let body_len = sk_raw.len() - 32;
+    let new_chk = wilis::hash::hash(&sk_raw[..body_len]);
+    sk_raw[body_len..].copy_from_slice(&new_chk);
+    assert!(SigningKey::from_bytes(&sk_raw).is_err());
+
+    let _ = std::fs::remove_dir_all(&base);
+}

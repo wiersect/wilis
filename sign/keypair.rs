@@ -127,11 +127,12 @@ impl SigningKey {
             )));
         }
 
-        let leaf_index = self.next_index;
-        self.next_index += 1;
-
+        // Draw OS randomness BEFORE advancing next_index so RNG failure never burns a leaf
         let mut randomizer = [0u8; HASH_BYTES];
         fill_random(&mut randomizer)?;
+
+        let leaf_index = self.next_index;
+        self.next_index += 1;
 
         let digest = hash_randomized_message(
             &randomizer,
@@ -193,6 +194,12 @@ impl SigningKey {
             )));
         }
         let next_index = u32::from_le_bytes(body[5..9].try_into().expect("4 bytes"));
+        if next_index > (1u32 << height) {
+            return Err(WilisError::InvalidKey(format!(
+                "corrupted next_index {next_index} exceeds tree capacity {}",
+                1u32 << height
+            )));
+        }
         let mut secret_seed = [0u8; HASH_BYTES];
         let mut pub_seed = [0u8; HASH_BYTES];
         let mut root = [0u8; HASH_BYTES];

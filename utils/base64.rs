@@ -77,6 +77,18 @@ pub fn decode_base64(input: &str) -> Result<Vec<u8>> {
         let v2 = if chunk[2] == b'=' { 0 } else { decode_symbol(chunk[2])? as u32 };
         let v3 = if chunk[3] == b'=' { 0 } else { decode_symbol(chunk[3])? as u32 };
 
+        // Enforce strict RFC 4648 canonical zero trailing padding bits (blocks malleability)
+        if pad_count == 2 && (v1 & 0x0F) != 0 {
+            return Err(WilisError::InvalidEncoding(
+                "non-canonical Base64 padding bits (expected low 4 bits to be zero)".to_string(),
+            ));
+        }
+        if pad_count == 1 && (v2 & 0x03) != 0 {
+            return Err(WilisError::InvalidEncoding(
+                "non-canonical Base64 padding bits (expected low 2 bits to be zero)".to_string(),
+            ));
+        }
+
         let triple = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3;
 
         out.push(((triple >> 16) & 0xFF) as u8);

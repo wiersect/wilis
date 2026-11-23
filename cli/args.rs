@@ -153,9 +153,10 @@ pub enum Command {
 }
 
 /// Returns formatted CLI usage documentation.
-pub fn usage_text() -> &'static str {
-    "\
-Wilis v0.4.0 — Standalone Post-Quantum & Symmetric Cryptography Suite (WilisPerm-384)
+pub fn usage_text() -> String {
+    format!(
+        "\
+Wilis v{} — Standalone Post-Quantum & Symmetric Cryptography Suite (WilisPerm-384)
 
 USAGE:
   wilis <COMMAND> [OPTIONS]
@@ -191,7 +192,9 @@ MAC, HASH, RANDOM & CRYPTANALYSIS:
   rand          --bytes <N>                       Generate N cryptographically secure random bytes (hex).
   bench         Run bijectivity, avalanche, and AEAD throughput benchmarks.
   audit         Run 6-part scientific cryptanalysis (SAC, BIC, DDT/LAT, NIST, Related-Key, KEM CCA2).
-  help          Display this usage guide."
+  help          Display this usage guide.",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 /// Parses command-line arguments (excluding program name `argv[0]`).

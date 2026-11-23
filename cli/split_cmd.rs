@@ -3,15 +3,18 @@
 use crate::error::Result;
 use crate::split::{combine_shares, split_secret, Share};
 use crate::utils::hex::{decode_hex, encode_hex};
+use crate::utils::zeroize::zeroize_bytes;
 
 /// Splits a hex-encoded secret key into `total` shares requiring `threshold` shares to recover.
 pub fn run_split_key(secret_hex: &str, total: u8, threshold: u8) -> Result<()> {
-    let secret = decode_hex(secret_hex)?;
-    let shares = split_secret(&secret, total, threshold)?;
+    let mut secret = decode_hex(secret_hex)?;
+    let secret_len = secret.len();
+    let shares_res = split_secret(&secret, total, threshold);
+    zeroize_bytes(&mut secret);
+    let shares = shares_res?;
 
     println!(
-        "Split {}-byte secret into {total} shares (threshold k={threshold}):",
-        secret.len()
+        "Split {secret_len}-byte secret into {total} shares (threshold k={threshold}):"
     );
     for share in &shares {
         println!("  Share {:02}/{:02}: {}", share.index, total, share.encode_string());
@@ -26,7 +29,9 @@ pub fn run_combine_key(share_tokens: &[String]) -> Result<()> {
         shares.push(Share::decode_string(token)?);
     }
 
-    let recovered = combine_shares(&shares)?;
-    println!("{}", encode_hex(&recovered));
+    let mut recovered = combine_shares(&shares)?;
+    let hex_out = encode_hex(&recovered);
+    zeroize_bytes(&mut recovered);
+    println!("{hex_out}");
     Ok(())
 }

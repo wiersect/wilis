@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::cli::args::{AuthInput, VaultAction};
 use crate::error::{Result, WilisError};
 use crate::kdf::KdfStrength;
+use crate::utils::zeroize::zeroize_bytes;
 use crate::vault::Vault;
 
 fn extract_pass_auth(auth: &AuthInput) -> Result<(&[u8], Option<&[u8; 32]>, KdfStrength)> {
@@ -38,9 +39,12 @@ pub fn run_vault(vault_path: &str, auth: AuthInput, action: VaultAction) -> Resu
             println!("Initialized encrypted WilisVault at '{vault_path}'");
             Ok(())
         }
-        VaultAction::Set { name, value } => {
+        VaultAction::Set { name, mut value } => {
             let mut vault = Vault::load_encrypted(path, pass, keyfile_hash)?;
-            vault.set(&name, &value)?;
+            let set_res = vault.set(&name, &value);
+            // SAFETY: Overwriting UTF-8 string bytes with 0x00 preserves UTF-8 validity.
+            zeroize_bytes(unsafe { value.as_bytes_mut() });
+            set_res?;
             vault.save_encrypted(path, pass, keyfile_hash, strength.to_params())?;
             println!(
                 "Saved secret '{name}' in '{vault_path}' ({} total entries)",

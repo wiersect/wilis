@@ -1,5 +1,5 @@
 """
-Zero-dependency Python 3 binding for the Wilis v0.4.0 Cryptography Suite (`libwilis`).
+Zero-dependency Python 3 binding for the Wilis v0.4.1 Cryptography Suite (`libwilis`).
 
 Build the shared library first with:
     cargo build --release
@@ -43,13 +43,6 @@ def _default_library_path() -> pathlib.Path:
     raise FileNotFoundError(
         f"Could not find {lib_name} in {root / 'target'}. Run `cargo build --release` first."
     )
-
-
-def _as_const_buf(data: bytes) -> Tuple[ctypes.c_void_p, int]:
-    if not data:
-        return ctypes.c_void_p(0), 0
-    buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
-    return ctypes.cast(buf, ctypes.c_void_p), len(data)
 
 
 class Wilis:
@@ -264,7 +257,7 @@ if __name__ == "__main__":
     # 1. AEAD + MAC + XOF
     key = w.random_bytes(32)
     nonce = w.random_bytes(24)
-    msg = b"\x00Hello from Wilis v0.4.0 Python C-FFI!\x00"
+    msg = b"\x00Hello from Wilis v0.4.1 Python C-FFI!\x00"
     ct, tag = w.aead_seal(key, nonce, b"py-aad", msg)
     assert w.aead_open(key, nonce, b"py-aad", ct, tag) == msg
     assert len(w.mac_256(key, msg)) == 32
@@ -276,4 +269,4 @@ if __name__ == "__main__":
     ss2 = w.kem_decapsulate(sk, kem_ct)
     assert ss1 == ss2
 
-    print("Python C-FFI v0.4.0 (AEAD + MAC + XOF + Post-Quantum KEM): PASS")
+    print("Python C-FFI v0.4.1 (AEAD + MAC + XOF + Post-Quantum KEM): PASS")

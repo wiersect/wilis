@@ -10,7 +10,7 @@ use crate::format::{
     decrypt_with_passphrase_and_keyfile, encrypt_with_passphrase_and_keyfile,
 };
 use crate::kdf::KdfParams;
-use crate::utils::zeroize::zeroize_bytes;
+use crate::utils::zeroize::{write_secret_file, zeroize_bytes};
 
 const VAULT_MAGIC: [u8; 4] = *b"WVLT";
 const VAULT_VERSION: u8 = 1;
@@ -38,7 +38,10 @@ impl Vault {
                 "vault secret name must not be empty".into(),
             ));
         }
-        self.entries.insert(k, value.into());
+        if let Some(mut old) = self.entries.insert(k, value.into()) {
+            // SAFETY: Overwriting UTF-8 string bytes with 0x00 preserves UTF-8 validity.
+            zeroize_bytes(unsafe { old.as_bytes_mut() });
+        }
         Ok(())
     }
 
@@ -49,7 +52,13 @@ impl Vault {
 
     /// Deletes a secret entry by `name`, returning `true` if it existed.
     pub fn delete(&mut self, name: &str) -> bool {
-        self.entries.remove(name).is_some()
+        if let Some(mut old) = self.entries.remove(name) {
+            // SAFETY: Overwriting UTF-8 string bytes with 0x00 preserves UTF-8 validity.
+            zeroize_bytes(unsafe { old.as_bytes_mut() });
+            true
+        } else {
+            false
+        }
     }
 
     /// Lists all secret names in sorted order.
@@ -94,34 +103,41 @@ impl Vault {
         }
         let count = u32::from_le_bytes(data[5..9].try_into().expect("4 bytes")) as usize;
         let mut pos = 9usize;
-        let mut entries = BTreeMap::new();
+        // Construct Vault immediately so Drop zeroizes already-parsed secrets on any parse error.
+        let mut vault = Self::new();
 
         for _ in 0..count {
-            if pos + 4 > data.len() {
+            if data.len().saturating_sub(pos) < 4 {
                 return Err(WilisError::InvalidFormat("truncated vault key length".into()));
             }
             let klen = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("4 bytes")) as usize;
             pos += 4;
-            if pos + klen > data.len() {
+            if data.len().saturating_sub(pos) < klen {
                 return Err(WilisError::InvalidFormat("truncated vault key bytes".into()));
             }
             let k = String::from_utf8(data[pos..pos + klen].to_vec())
                 .map_err(|_| WilisError::InvalidEncoding("non-UTF-8 vault key".into()))?;
+            if k.is_empty() {
+                return Err(WilisError::InvalidFormat("empty vault secret name".into()));
+            }
             pos += klen;
 
-            if pos + 4 > data.len() {
+            if data.len().saturating_sub(pos) < 4 {
                 return Err(WilisError::InvalidFormat("truncated vault value length".into()));
             }
             let vlen = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("4 bytes")) as usize;
             pos += 4;
-            if pos + vlen > data.len() {
+            if data.len().saturating_sub(pos) < vlen {
                 return Err(WilisError::InvalidFormat("truncated vault value bytes".into()));
             }
-            let v = String::from_utf8(data[pos..pos + vlen].to_vec())
-                .map_err(|_| WilisError::InvalidEncoding("non-UTF-8 vault value".into()))?;
+            let v = String::from_utf8(data[pos..pos + vlen].to_vec()).map_err(|err| {
+                let mut raw = err.into_bytes();
+                zeroize_bytes(&mut raw);
+                WilisError::InvalidEncoding("non-UTF-8 vault value".into())
+            })?;
             pos += vlen;
 
-            entries.insert(k, v);
+            vault.set(k, v)?;
         }
 
         if pos != data.len() {
@@ -130,7 +146,7 @@ impl Vault {
             ));
         }
 
-        Ok(Self { entries })
+        Ok(vault)
     }
 
     /// Atomically encrypts and saves the vault to `path` via a temporary file + rename.
@@ -142,21 +158,28 @@ impl Vault {
         params: KdfParams,
     ) -> Result<()> {
         let mut raw = self.to_bytes();
-        let encrypted = encrypt_with_passphrase_and_keyfile(
+        let enc_res = encrypt_with_passphrase_and_keyfile(
             passphrase,
             keyfile_hash,
             &raw,
             VAULT_AAD,
             params,
-        )?;
+        );
         zeroize_bytes(&mut raw);
+        let encrypted = enc_res?;
 
-        // Atomic write via sibling temporary file
+        // Atomic write via owner-only (0600 on Unix) sibling temporary file
         let mut tmp_os = path.as_os_str().to_os_string();
         tmp_os.push(".tmp");
         let tmp_path = std::path::PathBuf::from(tmp_os);
-        fs::write(&tmp_path, &encrypted)?;
-        fs::rename(&tmp_path, path)?;
+        if let Err(e) = write_secret_file(&tmp_path, &encrypted) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+        if let Err(e) = fs::rename(&tmp_path, path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -173,9 +196,9 @@ impl Vault {
             &encrypted,
             VAULT_AAD,
         )?;
-        let vault = Self::from_bytes(&raw)?;
+        let vault_res = Self::from_bytes(&raw);
         zeroize_bytes(&mut raw);
-        Ok(vault)
+        vault_res
     }
 }
 

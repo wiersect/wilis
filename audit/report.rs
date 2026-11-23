@@ -59,7 +59,10 @@ pub fn run_full_audit() -> AuditSummary {
 /// Formats an [`AuditSummary`] into a readable terminal report.
 pub fn format_audit_report(summary: &AuditSummary) -> String {
     let mut out = String::new();
-    out.push_str("=== Wilis v0.4.0 Cryptanalysis & Security Audit Report ===\n\n");
+    out.push_str(&format!(
+        "=== Wilis v{} Cryptanalysis & Security Audit Report ===\n\n",
+        env!("CARGO_PKG_VERSION")
+    ));
 
     out.push_str("[1/6] Round-by-Round Strict Avalanche Criterion (384-bit state)\n");
     for r in &summary.round_avalanche {

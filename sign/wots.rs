@@ -7,6 +7,7 @@
 
 use crate::core::constants::HASH_BYTES;
 use crate::hash::WilisHash;
+use crate::utils::zeroize::zeroize_bytes;
 
 /// Winternitz parameter `w = 16` (4-bit nibbles).
 pub const WOTS_W: u8 = 16;
@@ -96,6 +97,7 @@ pub fn wots_chain(
         h_fn.update(b"WSIG_FN1");
         h_fn.update(&key);
         h_fn.update(&masked);
+        zeroize_bytes(&mut masked);
         value = h_fn.finalize();
     }
     value
@@ -113,8 +115,9 @@ pub fn compute_leaf_pk_hash(
     h_leaf.update(&leaf_idx.to_le_bytes());
 
     for chain_idx in 0..WOTS_LEN {
-        let sk_i = derive_wots_secret_elem(secret_seed, pub_seed, leaf_idx, chain_idx as u16);
+        let mut sk_i = derive_wots_secret_elem(secret_seed, pub_seed, leaf_idx, chain_idx as u16);
         let pk_i = wots_chain(sk_i, 0, WOTS_MAX_STEP, pub_seed, leaf_idx, chain_idx as u16);
+        zeroize_bytes(&mut sk_i);
         h_leaf.update(&pk_i);
     }
 
@@ -132,7 +135,7 @@ pub fn wots_sign_digest(
     let mut sig = [[0u8; HASH_BYTES]; WOTS_LEN];
 
     for chain_idx in 0..WOTS_LEN {
-        let sk_i = derive_wots_secret_elem(secret_seed, pub_seed, leaf_idx, chain_idx as u16);
+        let mut sk_i = derive_wots_secret_elem(secret_seed, pub_seed, leaf_idx, chain_idx as u16);
         sig[chain_idx] = wots_chain(
             sk_i,
             0,
@@ -141,6 +144,7 @@ pub fn wots_sign_digest(
             leaf_idx,
             chain_idx as u16,
         );
+        zeroize_bytes(&mut sk_i);
     }
 
     sig

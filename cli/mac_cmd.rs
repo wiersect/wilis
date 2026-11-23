@@ -9,7 +9,7 @@ use crate::mac::WilisMac;
 use crate::utils::constant_time::ct_eq;
 use crate::utils::hex::{decode_hex, encode_hex};
 use crate::utils::random::fill_random;
-use crate::utils::zeroize::SecretKey;
+use crate::utils::zeroize::{zeroize_bytes, SecretKey};
 
 fn compute_file_mac(key: &[u8; KEY_BYTES], path: &str) -> Result<[u8; TAG_BYTES]> {
     let mut f = File::open(path)?;
@@ -82,6 +82,10 @@ pub fn run_rand(num_bytes: usize) -> Result<()> {
     }
     let mut buf = vec![0u8; num_bytes];
     fill_random(&mut buf)?;
-    println!("{}", encode_hex(&buf));
+    let mut hex = encode_hex(&buf);
+    zeroize_bytes(&mut buf);
+    println!("{hex}");
+    // SAFETY: Overwriting UTF-8 hex bytes with 0x00 preserves UTF-8 validity.
+    zeroize_bytes(unsafe { hex.as_bytes_mut() });
     Ok(())
 }

@@ -75,7 +75,7 @@ flowchart TD
 | **Related-Key Sensitivity** (256 flips) | **`50.07%`** ciphertext · **`49.89%`** tag diffusion | `[47.5% .. 52.5%]` | **PASS** |
 | **`WilisKEM` IND-CCA2 Self-Audit** | Zero decapsulation errors + FO implicit rejection | Exact match & tamper reject | **PASS** |
 | **Adversarial Parser Fuzz Audit** | 300+ malformed/truncated/overflow payloads across all 16 parsers | **Zero panics** | **PASS** |
-| **Cross-Platform CI & Test Suite** | **`33 / 33` tests passing** (Linux, macOS, Windows) | `-D warnings`, 0 external crates | **PASS** |
+| **Cross-Platform CI & Test Suite** | **`34 / 34` tests passing** (Linux, macOS, Windows) | `-D warnings`, 0 external crates | **PASS** |
 
 ---
 
@@ -85,7 +85,7 @@ flowchart TD
 git clone https://github.com/wiersect/wilis.git
 cd wilis
 
-# Run all 33 tests (including post-quantum KEM, WOTS+, ratchet, Shamir, vault, FFI, and fuzz audit)
+# Run all 34 tests (including post-quantum KEM, WOTS+, ratchet, Shamir, vault, FFI, and fuzz audit)
 cargo test
 
 # Build optimized CLI binary + native shared library (libwilis.so / .dylib / .dll)
@@ -193,7 +193,7 @@ wilis/
 ├── bindings/python/wilis_py.py # Zero-dependency Python 3 ctypes wrapper
 ├── utils/                      # Cross-platform CSPRNG (Unix/Windows), constant-time, zeroize, prompt
 ├── cli/                        # Zero-dependency CLI commands & parser
-└── tests/                      # 33 unit, security, post-quantum, ratchet, FFI & fuzz audit tests
+└── tests/                      # 34 unit, security, post-quantum, ratchet, FFI & fuzz audit tests
 ```
 
 ---

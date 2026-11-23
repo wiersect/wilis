@@ -143,15 +143,9 @@ impl KemSecretKey {
 impl Drop for KemSecretKey {
     fn drop(&mut self) {
         for p in &mut self.s {
-            for c in &mut p.coeffs {
-                // SAFETY: `c` is a valid mutable u16 reference inside `p.coeffs`.
-                unsafe {
-                    core::ptr::write_volatile(c as *mut u16, 0);
-                }
-            }
+            p.zeroize();
         }
         zeroize_bytes(&mut self.z);
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -187,17 +181,17 @@ impl KemCiphertext {
 
 /// Deterministic IND-CPA Module-LWE encryption subroutine used inside the FO transform.
 fn cpa_encrypt(pk: &KemPublicKey, msg: &[u8; 32], coins: &[u8; 32]) -> KemCiphertext {
-    let r = [
+    let mut r = [
         Poly::sample_cbd2(coins, 0),
         Poly::sample_cbd2(coins, 1),
         Poly::sample_cbd2(coins, 2),
     ];
-    let e1 = [
+    let mut e1 = [
         Poly::sample_cbd2(coins, 3),
         Poly::sample_cbd2(coins, 4),
         Poly::sample_cbd2(coins, 5),
     ];
-    let e2 = Poly::sample_cbd2(coins, 6);
+    let mut e2 = Poly::sample_cbd2(coins, 6);
 
     // u = A^T * r + e1
     let mut u = [Poly::zero(), Poly::zero(), Poly::zero()];
@@ -212,17 +206,30 @@ fn cpa_encrypt(pk: &KemPublicKey, msg: &[u8; 32], coins: &[u8; 32]) -> KemCipher
     }
 
     // v = t^T * r + e2 + encode(msg)
-    let m_poly = Poly::from_msg_bits(msg);
+    let mut m_poly = Poly::from_msg_bits(msg);
     let v = vec_dot(&pk.t, &r).add(&e2).add(&m_poly);
+
+    // Wipe ephemeral secret polynomials from memory
+    for p in &mut r {
+        p.zeroize();
+    }
+    for p in &mut e1 {
+        p.zeroize();
+    }
+    e2.zeroize();
+    m_poly.zeroize();
 
     KemCiphertext { u, v }
 }
 
 /// IND-CPA Module-LWE decryption subroutine.
 fn cpa_decrypt(s: &[Poly; KEM_K], ct: &KemCiphertext) -> [u8; 32] {
-    let su = vec_dot(s, &ct.u);
-    let diff = ct.v.sub(&su);
-    diff.to_msg_bits()
+    let mut su = vec_dot(s, &ct.u);
+    let mut diff = ct.v.sub(&su);
+    let msg = diff.to_msg_bits();
+    su.zeroize();
+    diff.zeroize();
+    msg
 }
 
 fn fo_derive_kbar_and_coins(msg: &[u8; 32], pk_hash: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
@@ -260,7 +267,7 @@ pub fn keygen() -> Result<(KemSecretKey, KemPublicKey)> {
         Poly::sample_cbd2(&sigma, 1),
         Poly::sample_cbd2(&sigma, 2),
     ];
-    let e = [
+    let mut e = [
         Poly::sample_cbd2(&sigma, 3),
         Poly::sample_cbd2(&sigma, 4),
         Poly::sample_cbd2(&sigma, 5),
@@ -277,6 +284,9 @@ pub fn keygen() -> Result<(KemSecretKey, KemPublicKey)> {
             acc = acc.add(&prod);
         }
         t[row] = acc;
+    }
+    for p in &mut e {
+        p.zeroize();
     }
 
     let pk = KemPublicKey { rho, t };
@@ -299,12 +309,14 @@ pub fn encapsulate(pk: &KemPublicKey) -> Result<(KemCiphertext, SecretKey)> {
     let (mut k_bar, mut coins) = fo_derive_kbar_and_coins(&msg, &pk_hash);
     let ct = cpa_encrypt(pk, &msg, &coins);
     let ct_hash = hash(&ct.to_bytes());
-    let ss = derive_final_shared_secret(b"WKEM_FO_K1", &k_bar, &ct_hash);
+    let mut ss = derive_final_shared_secret(b"WKEM_FO_K1", &k_bar, &ct_hash);
 
     zeroize_bytes(&mut msg);
     zeroize_bytes(&mut k_bar);
     zeroize_bytes(&mut coins);
-    Ok((ct, SecretKey::from_bytes(ss)))
+    let secret = SecretKey::from_bytes(ss);
+    zeroize_bytes(&mut ss);
+    Ok((ct, secret))
 }
 
 /// Decapsulates `ct` using `sk` with constant-time Fujisaki-Okamoto re-encryption check
@@ -334,5 +346,7 @@ pub fn decapsulate(sk: &KemSecretKey, ct: &KemCiphertext) -> SecretKey {
     zeroize_bytes(&mut coins_prime);
     zeroize_bytes(&mut ss_ok);
     zeroize_bytes(&mut ss_rej);
-    SecretKey::from_bytes(final_ss)
+    let secret = SecretKey::from_bytes(final_ss);
+    zeroize_bytes(&mut final_ss);
+    secret
 }

@@ -7,15 +7,18 @@ use crate::error::Result;
 use crate::hash::{hash_hex, WilisHash};
 use crate::utils::hex::encode_hex;
 use crate::utils::random::generate_key;
+use crate::utils::zeroize::zeroize_bytes;
 
 /// Generates a fresh 256-bit secret key and prints its hex representation and key ID.
 pub fn run_keygen() -> Result<()> {
     let key = generate_key()?;
-    let key_hex = encode_hex(key.as_bytes());
+    let mut key_hex = encode_hex(key.as_bytes());
     let fingerprint = hash_hex(key.as_bytes());
 
     println!("Key (256-bit hex) : {key_hex}");
     println!("Key ID (WilisHash-256): {}", &fingerprint[..32]);
+    // SAFETY: Overwriting UTF-8 hex bytes with 0x00 preserves UTF-8 validity.
+    zeroize_bytes(unsafe { key_hex.as_bytes_mut() });
     Ok(())
 }
 

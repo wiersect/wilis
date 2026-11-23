@@ -51,7 +51,7 @@ impl Share {
         let index = raw[5];
         let threshold = raw[6];
         let total = raw[7];
-        if index == 0 || threshold < 2 || total < threshold {
+        if index == 0 || threshold < 2 || total < threshold || index > total {
             return Err(WilisError::InvalidFormat(
                 "invalid threshold/index metadata in share".into(),
             ));
@@ -162,12 +162,13 @@ pub fn combine_shares(shares: &[Share]) -> Result<Vec<u8>> {
     }
 
     let threshold = shares[0].threshold;
+    let total = shares[0].total;
     let secret_len = shares[0].data.len();
     let expected_cmt = shares[0].commitment;
 
-    if threshold < 2 || secret_len == 0 {
+    if threshold < 2 || total < threshold || secret_len == 0 {
         return Err(WilisError::InvalidFormat(
-            "invalid share threshold or empty share payload".into(),
+            "invalid share threshold, total, or empty share payload".into(),
         ));
     }
 
@@ -181,8 +182,11 @@ pub fn combine_shares(shares: &[Share]) -> Result<Vec<u8>> {
     // Validate compatibility and uniqueness of x-coordinates
     let mut seen_x = [false; 256];
     for s in shares {
-        if s.index == 0 {
-            return Err(WilisError::InvalidFormat("share index 0 is invalid".into()));
+        if s.index == 0 || s.index > total {
+            return Err(WilisError::InvalidFormat(format!(
+                "share index {} is out of range 1..={total}",
+                s.index
+            )));
         }
         if seen_x[s.index as usize] {
             return Err(WilisError::InvalidFormat(format!(
@@ -193,6 +197,7 @@ pub fn combine_shares(shares: &[Share]) -> Result<Vec<u8>> {
         seen_x[s.index as usize] = true;
 
         if s.threshold != threshold
+            || s.total != total
             || s.data.len() != secret_len
             || !ct_eq(&s.commitment, &expected_cmt)
         {
@@ -204,37 +209,55 @@ pub fn combine_shares(shares: &[Share]) -> Result<Vec<u8>> {
     let subset = &shares[..threshold as usize];
     let k = subset.len();
 
-    // Precompute Lagrange basis weights L_i(0) = prod_{j != i} (x_j / (x_j ^ x_i))
-    let mut weights = vec![0u8; k];
-    for i in 0..k {
-        let xi = subset[i].index;
-        let mut num = 1u8;
-        let mut den = 1u8;
-        for (j, sj) in subset.iter().enumerate() {
-            if i == j {
-                continue;
+    // Helper: evaluate Lagrange interpolation of `subset` at any point `x_eval` in GF(2^8)
+    let eval_at = |x_eval: u8, out: &mut [u8]| {
+        let mut weights = vec![0u8; k];
+        for i in 0..k {
+            let xi = subset[i].index;
+            let mut num = 1u8;
+            let mut den = 1u8;
+            for (j, sj) in subset.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                let xj = sj.index;
+                num = gf_mul(num, gf_add(x_eval, xj));
+                den = gf_mul(den, gf_add(xi, xj));
             }
-            let xj = sj.index;
-            num = gf_mul(num, xj);
-            den = gf_mul(den, gf_add(xj, xi));
+            weights[i] = gf_div(num, den);
         }
-        weights[i] = gf_div(num, den);
-    }
+        for byte_pos in 0..secret_len {
+            let mut val = 0u8;
+            for i in 0..k {
+                val = gf_add(val, gf_mul(subset[i].data[byte_pos], weights[i]));
+            }
+            out[byte_pos] = val;
+        }
+    };
 
     let mut recovered = vec![0u8; secret_len];
-    for byte_pos in 0..secret_len {
-        let mut val = 0u8;
-        for i in 0..k {
-            val = gf_add(val, gf_mul(subset[i].data[byte_pos], weights[i]));
-        }
-        recovered[byte_pos] = val;
-    }
+    eval_at(0, &mut recovered);
 
     // Verify reconstructed secret against the embedded WilisHash-256 commitment
     let actual_cmt = secret_commitment(&recovered);
     if !ct_eq(&actual_cmt, &expected_cmt) {
         zeroize_bytes(&mut recovered);
         return Err(WilisError::AuthenticationFailed);
+    }
+
+    // If caller supplied more than `threshold` shares, verify EVERY extra share also lies
+    // on the exact same polynomial so corrupted backup shares are never silently ignored.
+    if shares.len() > k {
+        let mut expected_y = vec![0u8; secret_len];
+        for extra in &shares[k..] {
+            eval_at(extra.index, &mut expected_y);
+            if !ct_eq(&expected_y, &extra.data) {
+                zeroize_bytes(&mut expected_y);
+                zeroize_bytes(&mut recovered);
+                return Err(WilisError::AuthenticationFailed);
+            }
+        }
+        zeroize_bytes(&mut expected_y);
     }
 
     Ok(recovered)

@@ -12,6 +12,7 @@ use crate::stream::chunk_nonce::{
     build_chunk_aad, derive_chunk_nonce, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE,
 };
 use crate::utils::random::{generate_nonce, generate_salt};
+use crate::utils::zeroize::zeroize_bytes;
 
 /// Encrypts an arbitrary byte stream with a raw 256-bit key into a `WILS` v2 stream.
 ///
@@ -144,6 +145,8 @@ fn encrypt_stream_core<R: Read, W: Write>(
             .ok_or_else(|| WilisError::InvalidFormat("chunk counter overflow".into()))?;
     }
 
+    zeroize_bytes(&mut cur_buf);
+    zeroize_bytes(&mut next_buf);
     writer.flush()?;
     Ok((total_in, total_out))
 }

@@ -10,6 +10,7 @@ use crate::format::header::{ContainerHeader, KeyMode, FORMAT_VERSION_V2};
 use crate::hash::hash;
 use crate::kdf::derive_key_with_keyfile;
 use crate::stream::chunk_nonce::{build_chunk_aad, derive_chunk_nonce, MAX_CHUNK_SIZE};
+use crate::utils::zeroize::zeroize_bytes;
 
 /// Decrypts a `WILS` v2 stream using a raw 256-bit key.
 ///
@@ -129,10 +130,13 @@ fn decrypt_stream_core<R: Read, W: Write>(
 
         let chunk_nonce = derive_chunk_nonce(&header.nonce, chunk_index, is_final);
         let chunk_aad = build_chunk_aad(&header_digest, chunk_index, is_final, user_aad);
-        let pt = open(key, &chunk_nonce, &chunk_aad, &ct_buf, &tag)?;
+        let mut pt = open(key, &chunk_nonce, &chunk_aad, &ct_buf, &tag)?;
 
-        writer.write_all(&pt)?;
-        total_plain += pt.len() as u64;
+        let write_res = writer.write_all(&pt);
+        let pt_len = pt.len() as u64;
+        zeroize_bytes(&mut pt);
+        write_res?;
+        total_plain += pt_len;
 
         if is_final {
             seen_final = true;

@@ -1,10 +1,14 @@
 //! Volatile memory wiping utilities and auto-zeroizing secret key wrapper.
 
 use std::fmt;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{compiler_fence, Ordering};
 
 use crate::core::constants::KEY_BYTES;
+use crate::error::Result;
 
 /// Securely overwrites a byte slice with zeros using volatile writes so the
 /// compiler cannot optimize away the wipe as a dead store.
@@ -58,5 +62,37 @@ impl fmt::Debug for SecretKey {
 impl Drop for SecretKey {
     fn drop(&mut self) {
         zeroize_bytes(&mut self.bytes);
+    }
+}
+
+/// Writes sensitive key/vault bytes to `path` with strict owner-only permissions (`0600`)
+/// on Unix platforms so other local users cannot read secret key files.
+pub fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(data)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Returns `true` if two filesystem paths point to the exact same file (blocks in-place truncation).
+pub fn paths_refer_to_same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
     }
 }

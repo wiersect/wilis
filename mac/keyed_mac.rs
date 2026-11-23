@@ -73,20 +73,23 @@ impl WilisMac {
         padded[..self.buf_len].copy_from_slice(&self.buf[..self.buf_len]);
         padded[self.buf_len] = 0x80;
         self.state.xor_rate_block(&padded);
+        zeroize_bytes(&mut padded);
         self.state.words[5] ^= 0x01;
         self.state.xor_capacity_key(&self.key);
         permute(&mut self.state, ROUNDS_FULL);
 
         let mut tag = [0u8; TAG_BYTES];
-        let h1 = self.state.rate_bytes();
+        let mut h1 = self.state.rate_bytes();
         for i in 0..RATE_BYTES {
             tag[i] = h1[i] ^ self.key[i];
         }
+        zeroize_bytes(&mut h1);
         permute(&mut self.state, ROUNDS_DATA);
-        let h2 = self.state.rate_bytes();
+        let mut h2 = self.state.rate_bytes();
         for i in 0..RATE_BYTES {
             tag[RATE_BYTES + i] = h2[i] ^ self.key[RATE_BYTES + i];
         }
+        zeroize_bytes(&mut h2);
         tag
     }
 }

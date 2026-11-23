@@ -8,6 +8,7 @@ use crate::archive::pack::{WDIR_MAGIC, WDIR_VERSION};
 use crate::core::constants::{HASH_BYTES, KEY_BYTES};
 use crate::error::{Result, WilisError};
 use crate::stream::{decrypt_stream_with_key, decrypt_stream_with_passphrase};
+use crate::utils::zeroize::zeroize_bytes;
 
 /// Validates a relative archive path to completely block path traversal (`..`, absolute
 /// paths, drive prefixes, backslashes, or null bytes).
@@ -134,8 +135,14 @@ pub fn decrypt_directory_with_key(
 ) -> Result<u64> {
     let mut reader = BufReader::new(File::open(input_file)?);
     let mut decrypted = Vec::new();
-    decrypt_stream_with_key(key, &mut reader, &mut decrypted, user_aad)?;
-    unpack_directory(&mut Cursor::new(&decrypted), dest_dir)
+    let dec_res = decrypt_stream_with_key(key, &mut reader, &mut decrypted, user_aad);
+    if let Err(e) = dec_res {
+        zeroize_bytes(&mut decrypted);
+        return Err(e);
+    }
+    let unpack_res = unpack_directory(&mut Cursor::new(&decrypted), dest_dir);
+    zeroize_bytes(&mut decrypted);
+    unpack_res
 }
 
 /// Authenticates, decrypts, and safely unpacks a `WILS` v2 directory archive using a passphrase.
@@ -148,12 +155,18 @@ pub fn decrypt_directory_with_passphrase(
 ) -> Result<u64> {
     let mut reader = BufReader::new(File::open(input_file)?);
     let mut decrypted = Vec::new();
-    decrypt_stream_with_passphrase(
+    let dec_res = decrypt_stream_with_passphrase(
         passphrase,
         keyfile_hash,
         &mut reader,
         &mut decrypted,
         user_aad,
-    )?;
-    unpack_directory(&mut Cursor::new(&decrypted), dest_dir)
+    );
+    if let Err(e) = dec_res {
+        zeroize_bytes(&mut decrypted);
+        return Err(e);
+    }
+    let unpack_res = unpack_directory(&mut Cursor::new(&decrypted), dest_dir);
+    zeroize_bytes(&mut decrypted);
+    unpack_res
 }

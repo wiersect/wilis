@@ -6,6 +6,8 @@ use std::io::{self, BufRead, Read, Write};
 use crate::core::constants::HASH_BYTES;
 use crate::error::{Result, WilisError};
 use crate::hash::WilisHash;
+use crate::utils::constant_time::ct_eq;
+use crate::utils::zeroize::zeroize_bytes;
 
 /// RAII guard that disables terminal echo on Unix (`stty -echo`) and restores it on drop.
 #[cfg(unix)]
@@ -95,15 +97,19 @@ impl Drop for EchoGuard {
 /// Prompts the user for a passphrase with terminal echo disabled (prevents shoulder-surfing
 /// and keeps secrets out of shell command history).
 pub fn read_hidden_passphrase(prompt: &str, confirm: bool) -> Result<String> {
-    let first = prompt_once(prompt)?;
+    let mut first = prompt_once(prompt)?;
     if first.is_empty() {
         return Err(WilisError::InvalidKey(
             "passphrase must not be empty".to_string(),
         ));
     }
     if confirm {
-        let second = prompt_once("Confirm passphrase: ")?;
-        if first != second {
+        let mut second = prompt_once("Confirm passphrase: ")?;
+        let matches = ct_eq(first.as_bytes(), second.as_bytes());
+        // SAFETY: Overwriting UTF-8 string bytes with 0x00 preserves UTF-8 validity.
+        zeroize_bytes(unsafe { second.as_bytes_mut() });
+        if !matches {
+            zeroize_bytes(unsafe { first.as_bytes_mut() });
             return Err(WilisError::InvalidKey(
                 "passphrases do not match".to_string(),
             ));
@@ -144,6 +150,7 @@ pub fn hash_keyfile(path: &str) -> Result<[u8; HASH_BYTES]> {
         hasher.update(&buf[..n]);
         total += n as u64;
     }
+    zeroize_bytes(&mut buf);
 
     if total == 0 {
         return Err(WilisError::InvalidKey(format!(

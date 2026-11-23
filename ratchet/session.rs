@@ -77,7 +77,7 @@ fn ratchet_step(chain_key: &mut [u8; KEY_BYTES], counter: u64) -> MessageKeyMate
 
     // Overwrite chain key immediately so past states cannot be recovered
     chain_key.copy_from_slice(&material[0..KEY_BYTES]);
-    let msg_key: [u8; KEY_BYTES] = material[KEY_BYTES..KEY_BYTES * 2]
+    let mut msg_key: [u8; KEY_BYTES] = material[KEY_BYTES..KEY_BYTES * 2]
         .try_into()
         .expect("32 bytes");
     let nonce: [u8; NONCE_BYTES] = material[KEY_BYTES * 2..KEY_BYTES * 2 + NONCE_BYTES]
@@ -85,10 +85,9 @@ fn ratchet_step(chain_key: &mut [u8; KEY_BYTES], counter: u64) -> MessageKeyMate
         .expect("24 bytes");
     zeroize_bytes(&mut material);
 
-    MessageKeyMaterial {
-        key: SecretKey::from_bytes(msg_key),
-        nonce,
-    }
+    let key = SecretKey::from_bytes(msg_key);
+    zeroize_bytes(&mut msg_key);
+    MessageKeyMaterial { key, nonce }
 }
 
 fn build_ratchet_aad(counter: u64, user_aad: &[u8]) -> Vec<u8> {
@@ -129,6 +128,8 @@ impl RatchetSession {
         zeroize_bytes(&mut chains);
 
         let (send_chain, recv_chain) = if is_initiator { (c_a, c_b) } else { (c_b, c_a) };
+        zeroize_bytes(&mut c_a);
+        zeroize_bytes(&mut c_b);
         Self {
             send_chain,
             recv_chain,
@@ -139,9 +140,15 @@ impl RatchetSession {
     }
 
     /// Encrypts the next outgoing message, advancing and zeroizing the previous send chain key.
+    ///
+    /// # Panics
+    /// Panics only if `send_counter` reaches `u64::MAX` (2^64 - 1 messages in one session).
     pub fn encrypt_next(&mut self, plaintext: &[u8], user_aad: &[u8]) -> RatchetPacket {
         let counter = self.send_counter;
-        self.send_counter = self.send_counter.wrapping_add(1);
+        self.send_counter = self
+            .send_counter
+            .checked_add(1)
+            .expect("ratchet send counter exhausted");
 
         let mk = ratchet_step(&mut self.send_chain, counter);
         let aad = build_ratchet_aad(counter, user_aad);
@@ -155,8 +162,12 @@ impl RatchetSession {
     }
 
     /// Authenticates and decrypts an incoming [`RatchetPacket`], supporting bounded
-    /// out-of-order delivery while rejecting replayed or tampered messages.
+    /// out-of-order delivery while rejecting replayed, overflow, or tampered messages.
     pub fn decrypt_packet(&mut self, packet: &RatchetPacket, user_aad: &[u8]) -> Result<Vec<u8>> {
+        if packet.counter == u64::MAX {
+            return Err(WilisError::AuthenticationFailed);
+        }
+
         let aad = build_ratchet_aad(packet.counter, user_aad);
 
         // Case 1: Packet arrived out of order and its key is in the skipped cache
@@ -188,16 +199,25 @@ impl RatchetSession {
         }
         let target_mk = ratchet_step(&mut temp_chain, packet.counter);
 
-        let plaintext = open(
+        let res = open(
             target_mk.key.as_bytes(),
             &target_mk.nonce,
             &aad,
             &packet.ciphertext,
             &packet.tag,
-        )?;
+        );
+
+        let plaintext = match res {
+            Ok(pt) => pt,
+            Err(e) => {
+                zeroize_bytes(&mut temp_chain);
+                return Err(e);
+            }
+        };
 
         // Commit state advancement ONLY after authentication succeeds!
         self.recv_chain = temp_chain;
+        zeroize_bytes(&mut temp_chain);
         self.recv_counter = packet.counter + 1;
         for (c, mk) in pending_skipped {
             self.skipped.insert(c, mk);
