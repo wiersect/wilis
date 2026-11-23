@@ -11,8 +11,13 @@ env:
 
 jobs:
   verify:
-    name: Test, Release Build & Cryptanalysis Audit
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} — Test, Audit & FFI
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -21,6 +26,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Verify zero external dependencies
+        shell: bash
         run: |
           if awk '/^\[dependencies\]/{in_dep=1; next} /^\[/{in_dep=0} in_dep && /^[a-zA-Z0-9_-]+[[:space:]]*=/{print; found=1} END{exit found}' Cargo.toml; then
             echo "Verified: 0 external crate dependencies."
@@ -29,14 +35,28 @@ jobs:
             exit 1
           fi
 
-      - name: Run full test suite (17 cryptographic & security tests)
+      - name: Run full test suite
         run: cargo test --verbose
 
-      - name: Build optimized release binary
+      - name: Build optimized release binary & C-FFI shared library
         run: cargo build --release
 
-      - name: Run scientific cryptanalysis audit
-        run: ./target/release/wilis audit
+      - name: Run scientific cryptanalysis audit & benchmark
+        shell: bash
+        run: |
+          if [ -f ./target/release/wilis.exe ]; then
+            ./target/release/wilis.exe audit
+            ./target/release/wilis.exe bench
+          else
+            ./target/release/wilis audit
+            ./target/release/wilis bench
+          fi
 
-      - name: Run self-test & throughput benchmark
-        run: ./target/release/wilis bench
+      - name: Verify Python C-FFI binding against native libwilis
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then
+            python3 bindings/python/wilis_py.py
+          else
+            python bindings/python/wilis_py.py
+          fi

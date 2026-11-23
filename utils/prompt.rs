@@ -1,21 +1,22 @@
-//! Secure hidden terminal passphrase prompting & 2FA keyfile hashing (zero dependencies).
+//! Cross-platform terminal passphrase prompting & 2FA keyfile hashing (zero dependencies).
 
 use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
-use std::process::Command;
 
 use crate::core::constants::HASH_BYTES;
 use crate::error::{Result, WilisError};
 use crate::hash::WilisHash;
 
-/// RAII guard that disables terminal echo via `stty -echo` and restores it on drop.
+/// RAII guard that disables terminal echo on Unix (`stty -echo`) and restores it on drop.
+#[cfg(unix)]
 struct EchoGuard {
     active: bool,
 }
 
+#[cfg(unix)]
 impl EchoGuard {
     fn disable() -> Self {
-        let ok = Command::new("stty")
+        let ok = std::process::Command::new("stty")
             .arg("-echo")
             .status()
             .map(|s| s.success())
@@ -24,10 +25,69 @@ impl EchoGuard {
     }
 }
 
+#[cfg(unix)]
 impl Drop for EchoGuard {
     fn drop(&mut self) {
         if self.active {
-            let _ = Command::new("stty").arg("echo").status();
+            let _ = std::process::Command::new("stty").arg("echo").status();
+        }
+    }
+}
+
+/// RAII guard on Windows using `SetConsoleMode` to disable `ENABLE_ECHO_INPUT`.
+#[cfg(windows)]
+struct EchoGuard {
+    handle: *mut core::ffi::c_void,
+    original_mode: u32,
+    active: bool,
+}
+
+#[cfg(windows)]
+impl EchoGuard {
+    fn disable() -> Self {
+        const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+        const ENABLE_ECHO_INPUT: u32 = 0x0004;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetStdHandle(n_std_handle: u32) -> *mut core::ffi::c_void;
+            fn GetConsoleMode(h_console_handle: *mut core::ffi::c_void, lp_mode: *mut u32) -> i32;
+            fn SetConsoleMode(h_console_handle: *mut core::ffi::c_void, dw_mode: u32) -> i32;
+        }
+
+        // SAFETY: Standard Win32 console handle queries on process stdin.
+        unsafe {
+            let handle = GetStdHandle(STD_INPUT_HANDLE);
+            let mut mode: u32 = 0;
+            if !handle.is_null() && GetConsoleMode(handle, &mut mode) != 0 {
+                let ok = SetConsoleMode(handle, mode & !ENABLE_ECHO_INPUT) != 0;
+                return Self {
+                    handle,
+                    original_mode: mode,
+                    active: ok,
+                };
+            }
+        }
+        Self {
+            handle: core::ptr::null_mut(),
+            original_mode: 0,
+            active: false,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for EchoGuard {
+    fn drop(&mut self) {
+        if self.active {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn SetConsoleMode(h_console_handle: *mut core::ffi::c_void, dw_mode: u32) -> i32;
+            }
+            // SAFETY: Restores the original console mode captured in `disable()`.
+            unsafe {
+                let _ = SetConsoleMode(self.handle, self.original_mode);
+            }
         }
     }
 }

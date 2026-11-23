@@ -1,4 +1,10 @@
 /target
 **/*.rs.bk
 *.wils
+*.wsk
+*.wpk
+*.wsig
+*.tmp
 Cargo.lock
+__pycache__/
+*.pyc

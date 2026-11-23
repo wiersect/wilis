@@ -2,14 +2,18 @@
 
 All notable changes to **Wilis** are documented in this file.
 
+## [0.3.0] - 2026-11-23
+
+### Added
+- **Post-Quantum Digital Signatures (`WilisSign` — `sign/`)**: Stateful tweaked `WOTS+` (`w = 16`, 67 chains) + Merkle Tree (`height = 2..=10`) built strictly from `WilisHash-256`, with randomized message hashing, integrity-protected `WSK1`/`WPK1` key files, and atomic leaf-counter updates preventing one-time key reuse.
+- **Shamir's Secret Sharing (`WilisSplit` — `split/`)**: Information-theoretic `K`-of-`N` threshold secret splitting over branchless, constant-time `GF(2^8)` with built-in 64-bit `WilisHash-256` secret commitment checks and portable `wilis-share-v1:` text encoding.
+- **Encrypted Directory Archiver (`WilisDir` — `archive/`)**: Custom deterministic `WDIR` v1 recursive folder archiver streamed directly through `WILS` v2 chunked encryption (hiding filenames and hierarchy) with strict Zip-Slip / path-traversal validation.
+- **Encrypted Local Secret Vault (`WilisVault` — `vault/`)**: Atomic encrypted key-value secret store (`WVLT` v1) supporting passphrase + 2FA keyfile protection (`wilis vault init|set|get|list|del`).
+- **Native Windows Support**: Cross-platform OS CSPRNG (`BCryptGenRandom` on Windows, `/dev/urandom` on Unix) and Win32 `SetConsoleMode` hidden passphrase prompts.
+- **C-FFI & Python Bindings (`ffi/`, `include/wilis.h`, `bindings/python/wilis_py.py`)**: Exported `libwilis` shared/static C-ABI library plus a zero-dependency Python 3 `ctypes` wrapper.
+- **Multi-OS CI & Release Automation**: Automated testing, auditing, Python FFI verification, and release packaging across **Linux x86_64**, **macOS ARM64**, and **Windows x86_64**.
+
 ## [0.2.0] - 2026-11-23
 
 ### Added
-- **Core Permutation (`WilisPerm-384`)**: 384-bit hybrid ARX + bitsliced `Chi-5`/`Feistel-6` + invertible 3-tap diffusion permutation with 32 transparent prime fifth-root constants and exact inverse verification.
-- **Authenticated Encryption (`WilisAEAD`)**: Duplex sponge AEAD with 256-bit key, 192-bit nonce, 256-bit tag, 256-bit capacity, key whitening, and key-commitment protection.
-- **Hybrid Memory-Hard KDF (`WilisKDF` v2)**: 16 MiB (`interactive`), 32 MiB (`high`), and 64 MiB (`paranoid`) presets combining data-independent Pass 0 with data-dependent Passes `1..T` and optional 2-factor `--keyfile` mixing.
-- **Chunked Streaming AEAD (`WILS` v2)**: Constant-memory 64 KiB chunked file encryption resisting truncation, reordering, duplication, and trailing-data attacks.
-- **Sponge Hash (`WilisHash-256`)**: Incremental and one-shot 256-bit cryptographic hash.
-- **Scientific Cryptanalysis Audit (`wilis audit`)**: Automated per-round SAC (1–16), BIC, exact `Chi-5` DDT/LAT analysis, and NIST-style keystream randomness battery.
-- **Zero-Dependency CLI & Utilities**: Hidden interactive password prompts (`--pass-prompt`), constant-time comparisons, volatile zeroization, Base64/Hex codecs, and live benchmarks (`wilis bench`).
-- **Flat Modular Layout**: Clean root-level module directories (`core/`, `aead/`, `kdf/`, `hash/`, `format/`, `stream/`, `audit/`, `utils/`, `cli/`, `tests/`) with full technical specification (`SPECIFICATION.md`), security policy (`SECURITY.md`), and GitHub Actions CI.
+- Core `WilisPerm-384` permutation, `WilisAEAD`, hybrid memory-hard `WilisKDF` v2 (16–64 MiB + 2FA keyfile), `WILS` v2 chunked streaming, `WilisHash-256`, scientific `wilis audit` suite, flat root layout, formal `SPECIFICATION.md`, `SECURITY.md`, and GitHub Actions CI.

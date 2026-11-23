@@ -1,11 +1,15 @@
-//! Zero-dependency command-line interface for Wilis.
+//! Zero-dependency command-line interface for Wilis v0.3.0.
 
 pub mod args;
 pub mod audit_cmd;
 pub mod bench_cmd;
+pub mod dir_cmd;
 pub mod file_cmd;
 pub mod keygen_cmd;
+pub mod sign_cmd;
+pub mod split_cmd;
 pub mod text_cmd;
+pub mod vault_cmd;
 
 use crate::cli::args::{parse_args, Command};
 use crate::error::Result;
@@ -39,6 +43,40 @@ pub fn run(raw_args: &[String]) -> Result<()> {
             input_path,
             output_path,
         } => file_cmd::run_decrypt(auth, &aad, &input_path, &output_path),
+        Command::EncryptDir {
+            auth,
+            aad,
+            dir_path,
+            output_file,
+        } => dir_cmd::run_encrypt_dir(auth, &aad, &dir_path, &output_file),
+        Command::DecryptDir {
+            auth,
+            aad,
+            input_file,
+            out_dir,
+        } => dir_cmd::run_decrypt_dir(auth, &aad, &input_file, &out_dir),
+        Command::Vault {
+            vault_path,
+            auth,
+            action,
+        } => vault_cmd::run_vault(&vault_path, auth, action),
+        Command::SignKeygen { out_prefix, height } => sign_cmd::run_sign_keygen(&out_prefix, height),
+        Command::SignFile {
+            sk_path,
+            input_path,
+            sig_out_path,
+        } => sign_cmd::run_sign_file(&sk_path, &input_path, &sig_out_path),
+        Command::VerifyFile {
+            pk_path,
+            input_path,
+            sig_path,
+        } => sign_cmd::run_verify_file(&pk_path, &input_path, &sig_path),
+        Command::SplitKey {
+            secret_hex,
+            total,
+            threshold,
+        } => split_cmd::run_split_key(&secret_hex, total, threshold),
+        Command::CombineKey { shares } => split_cmd::run_combine_key(&shares),
         Command::Keygen => keygen_cmd::run_keygen(),
         Command::HashText { text } => keygen_cmd::run_hash_text(&text),
         Command::HashFile { path } => keygen_cmd::run_hash_file(&path),

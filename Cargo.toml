@@ -1,6 +1,6 @@
 [package]
 name = "wilis"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Wies <277550510+wiersect@users.noreply.github.com>"]
 description = "A standalone, zero-dependency custom cryptographic suite built from scratch on the WilisPerm-384 duplex sponge permutation."
@@ -8,12 +8,13 @@ license = "MIT"
 readme = "README.md"
 repository = "https://github.com/wiersect/wilis"
 homepage = "https://github.com/wiersect/wilis"
-keywords = ["cryptography", "aead", "sponge", "kdf", "zero-dependencies"]
+keywords = ["cryptography", "aead", "post-quantum", "shamir", "zero-dependencies"]
 categories = ["cryptography", "command-line-utilities"]
 
 [lib]
 name = "wilis"
 path = "lib.rs"
+crate-type = ["rlib", "cdylib", "staticlib"]
 
 [[bin]]
 name = "wilis"

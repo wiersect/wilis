@@ -1,4 +1,4 @@
-# Wilis Cryptographic Specification (v0.2.0)
+# Wilis Cryptographic Specification (v0.3.0)
 
 This document defines the exact mathematical construction and binary container wire formats of the **Wilis** cryptographic suite.
 
@@ -134,3 +134,34 @@ Chunk Frame (index = 0, 1, 2, ...):
 - Per-chunk nonce: `base_nonce ^ (chunk_index LE into bytes 16..24) ^ (0xFF at byte 15 if is_final)`.
 - Per-chunk AAD: `WilisHash-256(header_bytes) || chunk_index_u64_le || is_final_u8 || user_aad_len_u64_le || user_aad`.
 - Decryption rejects missing `is_final = 1` (truncation), any data after `is_final = 1` (append), swapped/duplicated chunks, or any tag mismatch.
+
+
+---
+
+## 6. Post-Quantum Digital Signatures: `WilisSign` (WOTS+ & Merkle Tree)
+
+Built exclusively from `WilisHash-256` (`n = 32` bytes), without relying on factoring or discrete-logarithm assumptions.
+
+- **Winternitz Parameters:** $w = 16$, $\ell_1 = 64$ message nibbles, $\ell_2 = 3$ checksum nibbles ($\sum (15 - d_i) \le 960 < 4096$), total chains $\ell = 67$.
+- **Leaf Secret Derivation:** $sk_{idx, c} = H(\text{"WSIG\_SK1"} \| S_{\text{seed}} \| P_{\text{seed}} \| idx_{\text{le32}} \| c_{\text{le16}})$.
+- **Tweaked Chain Step $s \in [0, 14]$:**
+  - $\text{mask} = H(\text{"WSIG\_BM1"} \| P_{\text{seed}} \| idx \| c \| s)$
+  - $\text{key} = H(\text{"WSIG\_KY1"} \| P_{\text{seed}} \| idx \| c \| s)$
+  - $v_{s+1} = H(\text{"WSIG\_FN1"} \| \text{key} \| (v_s \oplus \text{mask}))$
+- **Randomized Message Digest:** For fresh 256-bit CSPRNG randomizer $R$:
+  $$D = H(\text{"WSIG\_MG1"} \| R \| P_{\text{seed}} \| \text{root} \| idx \| |M|_{\text{le64}} \| M)$$
+- **Merkle Tree (`height` $\in [2, 10]$):** Supports $2^{\text{height}}$ stateful one-time signatures; secret keys refuse to sign once `next_index == 2^height`.
+
+---
+
+## 7. Threshold Secret Sharing: `WilisSplit`
+
+- **Field:** $\mathrm{GF}(2^8)$ modulo irreducible polynomial $x^8 + x^4 + x^3 + x + 1$ (`0x11B`), implemented with branchless constant-time bit-level multiplication and Fermat inversion ($a^{254}$).
+- **Commitment:** Every share embeds `WilisHash-256("WSHR_CMT" || secret)[0..8]` so tampering, wrong thresholds, or mixing shares from distinct secrets fails verification immediately.
+
+---
+
+## 8. Archive (`WDIR` v1) & Vault (`WVLT` v1) Formats
+
+- **`WDIR` v1:** `[ "WDIR": 4B ][ ver=1: 1B ][ count: u64 LE ]` followed by sorted entries `[ path_len: u32 LE ][ utf8_rel_posix_path ][ file_len: u64 LE ][ file_bytes ]`, streamed through `WILS` v2 AEAD. Unpacking enforces strict path-traversal rejection.
+- **`WVLT` v1:** `[ "WVLT": 4B ][ ver=1: 1B ][ count: u32 LE ]` followed by `[ klen: u32 LE ][ key ][ vlen: u32 LE ][ val ]`, authenticated with `WilisAEAD` (bound AAD `"wilis-vault-v1"`) and saved atomically via sibling `.wils.tmp` rename.

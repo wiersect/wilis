@@ -1,0 +1,145 @@
+//! Safe `WDIR` v1 unpacking with strict Zip-Slip / path-traversal protection.
+
+use std::fs::{self, File};
+use std::io::{BufReader, Cursor, Read, Write};
+use std::path::{Component, Path, PathBuf};
+
+use crate::archive::pack::{WDIR_MAGIC, WDIR_VERSION};
+use crate::core::constants::{HASH_BYTES, KEY_BYTES};
+use crate::error::{Result, WilisError};
+use crate::stream::{decrypt_stream_with_key, decrypt_stream_with_passphrase};
+
+/// Validates a relative archive path to completely block path traversal (`..`, absolute
+/// paths, drive prefixes, backslashes, or null bytes).
+pub fn sanitize_archive_path(dest_root: &Path, rel_path: &str) -> Result<PathBuf> {
+    if rel_path.is_empty()
+        || rel_path.contains('\0')
+        || rel_path.contains('\\')
+        || rel_path.starts_with('/')
+    {
+        return Err(WilisError::InvalidFormat(format!(
+            "unsafe path rejected in archive: '{rel_path}'"
+        )));
+    }
+
+    let mut clean = dest_root.to_path_buf();
+    let mut component_count = 0usize;
+
+    for comp in Path::new(rel_path).components() {
+        match comp {
+            Component::Normal(part) => {
+                clean.push(part);
+                component_count += 1;
+            }
+            _ => {
+                return Err(WilisError::InvalidFormat(format!(
+                    "path traversal component rejected in archive: '{rel_path}'"
+                )));
+            }
+        }
+    }
+
+    if component_count == 0 {
+        return Err(WilisError::InvalidFormat(
+            "empty normalized archive path rejected".into(),
+        ));
+    }
+
+    Ok(clean)
+}
+
+/// Unpacks a verified `WDIR` v1 byte stream into `dest_dir`, returning extracted file count.
+pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64> {
+    let mut hdr = [0u8; 13];
+    reader.read_exact(&mut hdr).map_err(|_| {
+        WilisError::InvalidFormat("truncated WDIR archive header".into())
+    })?;
+
+    if hdr[0..4] != WDIR_MAGIC || hdr[4] != WDIR_VERSION {
+        return Err(WilisError::InvalidFormat(
+            "invalid WDIR archive magic or unsupported version".into(),
+        ));
+    }
+
+    let file_count = u64::from_le_bytes(hdr[5..13].try_into().expect("8 bytes"));
+    fs::create_dir_all(dest_dir)?;
+
+    let mut copy_buf = [0u8; 64 * 1024];
+    for _ in 0..file_count {
+        let mut len_buf = [0u8; 4];
+        reader.read_exact(&mut len_buf).map_err(|_| {
+            WilisError::InvalidFormat("truncated WDIR path length".into())
+        })?;
+        let path_len = u32::from_le_bytes(len_buf) as usize;
+        if path_len == 0 || path_len > 4096 {
+            return Err(WilisError::InvalidFormat(
+                "invalid WDIR entry path length".into(),
+            ));
+        }
+
+        let mut path_bytes = vec![0u8; path_len];
+        reader.read_exact(&mut path_bytes).map_err(|_| {
+            WilisError::InvalidFormat("truncated WDIR entry path".into())
+        })?;
+        let rel_path = String::from_utf8(path_bytes).map_err(|_| {
+            WilisError::InvalidEncoding("non-UTF-8 path in WDIR archive".into())
+        })?;
+
+        let target_path = sanitize_archive_path(dest_dir, &rel_path)?;
+
+        let mut size_buf = [0u8; 8];
+        reader.read_exact(&mut size_buf).map_err(|_| {
+            WilisError::InvalidFormat("truncated WDIR file size".into())
+        })?;
+        let mut remaining = u64::from_le_bytes(size_buf);
+
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut out_file = File::create(&target_path)?;
+        while remaining > 0 {
+            let to_read = (remaining as usize).min(copy_buf.len());
+            reader.read_exact(&mut copy_buf[..to_read]).map_err(|_| {
+                WilisError::InvalidFormat("truncated WDIR file payload".into())
+            })?;
+            out_file.write_all(&copy_buf[..to_read])?;
+            remaining -= to_read as u64;
+        }
+    }
+
+    Ok(file_count)
+}
+
+/// Authenticates, decrypts, and safely unpacks a `WILS` v2 directory archive using a raw key.
+pub fn decrypt_directory_with_key(
+    key: &[u8; KEY_BYTES],
+    input_file: &Path,
+    dest_dir: &Path,
+    user_aad: &[u8],
+) -> Result<u64> {
+    let mut reader = BufReader::new(File::open(input_file)?);
+    let mut decrypted = Vec::new();
+    decrypt_stream_with_key(key, &mut reader, &mut decrypted, user_aad)?;
+    unpack_directory(&mut Cursor::new(&decrypted), dest_dir)
+}
+
+/// Authenticates, decrypts, and safely unpacks a `WILS` v2 directory archive using a passphrase.
+pub fn decrypt_directory_with_passphrase(
+    passphrase: &[u8],
+    keyfile_hash: Option<&[u8; HASH_BYTES]>,
+    input_file: &Path,
+    dest_dir: &Path,
+    user_aad: &[u8],
+) -> Result<u64> {
+    let mut reader = BufReader::new(File::open(input_file)?);
+    let mut decrypted = Vec::new();
+    decrypt_stream_with_passphrase(
+        passphrase,
+        keyfile_hash,
+        &mut reader,
+        &mut decrypted,
+        user_aad,
+    )?;
+    unpack_directory(&mut Cursor::new(&decrypted), dest_dir)
+}
