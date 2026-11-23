@@ -4,6 +4,9 @@
 *.wsk
 *.wpk
 *.wsig
+*.wkp
+*.wks
+*.wpke
 *.tmp
 Cargo.lock
 __pycache__/

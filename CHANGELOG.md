@@ -2,18 +2,28 @@
 
 All notable changes to **Wilis** are documented in this file.
 
+## [0.4.0] - 2026-11-23
+
+### Added
+- **Post-Quantum Public-Key Encryption & KEM (`WilisKEM` — `kem/`)**: Original Module-LWE (`k = 3`, `N = 256`, `q = 7681`, `CBD_2`, `49σ` noise margin) with exact 13-bit canonical packing, Fujisaki-Okamoto IND-CCA2 constant-time implicit rejection, and hybrid `WPKE` v1 file encryption (`wilis kem-keygen`, `pub-encrypt`, `pub-decrypt`).
+- **Forward-Secret Messaging Ratchet (`WilisRatchet` — `ratchet/`)**: Bidirectional symmetric chain ratchet destroying prior chain keys after every message, with bounded out-of-order delivery (`MAX_SKIP_WINDOW = 64`), speculative verification (preventing forged-packet state corruption), and replay rejection.
+- **Extendable-Output Sponge (`WilisXOF` — `xof/`)**: Domain-separated arbitrary-length XOF and deterministic PRNG powered by `WilisPerm-384`.
+- **Keyed 256-bit MAC & Subkey Derivation (`WilisMAC` — `mac/`)**: Length-extension-immune keyed sponge MAC (`wilis mac`, `mac-verify`), domain-separated `derive_subkey`, and `wilis rand`.
+- **Expanded 6-Part Scientific Audit (`audit/`)**: Added `[5/6]` 256-bit Related-Key Sensitivity test on `WilisAEAD` and `[6/6]` live Post-Quantum `WilisKEM` CCA2 & implicit rejection audit.
+- **Expanded C-FFI & Python Bindings**: Exported `wilis_mac_256`, `wilis_xof_derive`, `wilis_kem_keygen`, `wilis_kem_encapsulate`, and `wilis_kem_decapsulate` over `libwilis` and `bindings/python/wilis_py.py` (upgraded to `c_void_p` buffers for strict embedded-NUL safety).
+- **Adversarial Parser Fuzz Suite (`tests/bug_audit_fuzz.rs`)**: Fuzzes all 16 binary/text parsers across 300+ malformed, truncated, and overflow inputs to guarantee zero panics.
+
+### Security & Bug Fixes (Audit Pass)
+- Added volatile memory zeroization `Drop` implementations for `Vault` secret entries (`vault/store.rs`) and CLI `AuthInput` passphrases (`cli/args.rs`).
+- Enforced `MAX_ARCHIVE_FILES` cap and strict post-archive EOF trailing-garbage rejection in `WilisDir` (`archive/unpack.rs`).
+- Hardened `combine_shares` in `WilisSplit` (`split/shamir.rs`) against degenerate manually constructed `Share` structs (`threshold < 2` or empty data).
+
 ## [0.3.0] - 2026-11-23
 
 ### Added
-- **Post-Quantum Digital Signatures (`WilisSign` — `sign/`)**: Stateful tweaked `WOTS+` (`w = 16`, 67 chains) + Merkle Tree (`height = 2..=10`) built strictly from `WilisHash-256`, with randomized message hashing, integrity-protected `WSK1`/`WPK1` key files, and atomic leaf-counter updates preventing one-time key reuse.
-- **Shamir's Secret Sharing (`WilisSplit` — `split/`)**: Information-theoretic `K`-of-`N` threshold secret splitting over branchless, constant-time `GF(2^8)` with built-in 64-bit `WilisHash-256` secret commitment checks and portable `wilis-share-v1:` text encoding.
-- **Encrypted Directory Archiver (`WilisDir` — `archive/`)**: Custom deterministic `WDIR` v1 recursive folder archiver streamed directly through `WILS` v2 chunked encryption (hiding filenames and hierarchy) with strict Zip-Slip / path-traversal validation.
-- **Encrypted Local Secret Vault (`WilisVault` — `vault/`)**: Atomic encrypted key-value secret store (`WVLT` v1) supporting passphrase + 2FA keyfile protection (`wilis vault init|set|get|list|del`).
-- **Native Windows Support**: Cross-platform OS CSPRNG (`BCryptGenRandom` on Windows, `/dev/urandom` on Unix) and Win32 `SetConsoleMode` hidden passphrase prompts.
-- **C-FFI & Python Bindings (`ffi/`, `include/wilis.h`, `bindings/python/wilis_py.py`)**: Exported `libwilis` shared/static C-ABI library plus a zero-dependency Python 3 `ctypes` wrapper.
-- **Multi-OS CI & Release Automation**: Automated testing, auditing, Python FFI verification, and release packaging across **Linux x86_64**, **macOS ARM64**, and **Windows x86_64**.
+- Post-Quantum Digital Signatures (`WilisSign` WOTS+ Merkle), Shamir's Secret Sharing (`WilisSplit`), Encrypted Directory Archiver (`WilisDir`), Encrypted Secret Vault (`WilisVault`), native Windows CSPRNG/prompts, C-FFI & Python bindings, and multi-OS CI/Release builds.
 
 ## [0.2.0] - 2026-11-23
 
 ### Added
-- Core `WilisPerm-384` permutation, `WilisAEAD`, hybrid memory-hard `WilisKDF` v2 (16–64 MiB + 2FA keyfile), `WILS` v2 chunked streaming, `WilisHash-256`, scientific `wilis audit` suite, flat root layout, formal `SPECIFICATION.md`, `SECURITY.md`, and GitHub Actions CI.
+- Core `WilisPerm-384`, `WilisAEAD`, hybrid memory-hard `WilisKDF` v2 (16–64 MiB + 2FA keyfile), `WILS` v2 chunked streaming, `WilisHash-256`, scientific `wilis audit`, flat root layout, `SPECIFICATION.md`, `SECURITY.md`, and GitHub Actions CI.

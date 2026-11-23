@@ -28,7 +28,7 @@ pub fn run_encrypt(
     let mut reader = BufReader::new(File::open(input_path)?);
     let mut writer = BufWriter::new(File::create(output_path)?);
 
-    let (in_bytes, out_bytes) = match auth {
+    let (in_bytes, out_bytes) = match &auth {
         AuthInput::Passphrase {
             passphrase,
             keyfile_hash,
@@ -82,7 +82,7 @@ pub fn run_decrypt(
     match prefix[4] {
         FORMAT_VERSION => {
             let container = fs::read(input_path)?;
-            let plaintext = match auth {
+            let plaintext = match &auth {
                 AuthInput::Passphrase {
                     passphrase,
                     keyfile_hash,
@@ -112,7 +112,7 @@ pub fn run_decrypt(
             let mut reader = BufReader::new(File::open(input_path)?);
             let mut writer = BufWriter::new(File::create(output_path)?);
 
-            let res = match auth {
+            let res = match &auth {
                 AuthInput::Passphrase {
                     passphrase,
                     keyfile_hash,

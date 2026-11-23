@@ -19,7 +19,7 @@ pub fn run_encrypt_dir(
     let src = Path::new(dir_path);
     let dst = Path::new(output_file);
 
-    let (files, out_bytes) = match auth {
+    let (files, out_bytes) = match &auth {
         AuthInput::Passphrase {
             passphrase,
             keyfile_hash,
@@ -54,7 +54,7 @@ pub fn run_decrypt_dir(
     let src = Path::new(input_file);
     let dst = Path::new(out_dir);
 
-    let files = match auth {
+    let files = match &auth {
         AuthInput::Passphrase {
             passphrase,
             keyfile_hash,

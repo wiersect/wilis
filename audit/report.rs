@@ -1,6 +1,9 @@
 //! Unified cryptanalysis audit runner and formatted scorecard reporter.
 
 use crate::audit::avalanche::{analyze_avalanche_by_round, analyze_bic, BicResult, RoundAvalanche};
+use crate::audit::key_sensitivity::{
+    analyze_kem_cca2, analyze_related_key_sensitivity, KemAuditResult, KeySensitivityResult,
+};
 use crate::audit::randomness::{analyze_keystream_randomness, RandomnessMetrics};
 use crate::audit::sbox_analysis::{analyze_chi5_sbox, SboxMetrics};
 
@@ -12,10 +15,12 @@ pub struct AuditSummary {
     pub bic: BicResult,
     pub sbox: SboxMetrics,
     pub randomness: RandomnessMetrics,
+    pub key_sensitivity: KeySensitivityResult,
+    pub kem_cca2: KemAuditResult,
     pub overall_pass: bool,
 }
 
-/// Runs the complete cryptanalysis and statistical audit battery.
+/// Runs the complete 6-part cryptanalysis and statistical audit battery.
 pub fn run_full_audit() -> AuditSummary {
     let round_avalanche = analyze_avalanche_by_round();
     let first_full_diffusion_round = round_avalanche
@@ -25,12 +30,19 @@ pub fn run_full_audit() -> AuditSummary {
     let bic = analyze_bic(512);
     let sbox = analyze_chi5_sbox();
     let randomness = analyze_keystream_randomness(131_072);
+    let key_sensitivity = analyze_related_key_sensitivity();
+    let kem_cca2 = analyze_kem_cca2(8);
 
     let full_round_ok = round_avalanche
         .last()
         .map(|r| r.full_diffusion)
         .unwrap_or(false);
-    let overall_pass = full_round_ok && bic.passed && sbox.passed && randomness.all_passed;
+    let overall_pass = full_round_ok
+        && bic.passed
+        && sbox.passed
+        && randomness.all_passed
+        && key_sensitivity.passed
+        && kem_cca2.passed;
 
     AuditSummary {
         round_avalanche,
@@ -38,6 +50,8 @@ pub fn run_full_audit() -> AuditSummary {
         bic,
         sbox,
         randomness,
+        key_sensitivity,
+        kem_cca2,
         overall_pass,
     }
 }
@@ -45,9 +59,9 @@ pub fn run_full_audit() -> AuditSummary {
 /// Formats an [`AuditSummary`] into a readable terminal report.
 pub fn format_audit_report(summary: &AuditSummary) -> String {
     let mut out = String::new();
-    out.push_str("=== Wilis Cryptanalysis & Security Audit Report ===\n\n");
+    out.push_str("=== Wilis v0.4.0 Cryptanalysis & Security Audit Report ===\n\n");
 
-    out.push_str("[1/4] Round-by-Round Strict Avalanche Criterion (384-bit state)\n");
+    out.push_str("[1/6] Round-by-Round Strict Avalanche Criterion (384-bit state)\n");
     for r in &summary.round_avalanche {
         if r.rounds <= 4 || r.rounds == 8 || r.rounds == 12 || r.rounds == 16 {
             out.push_str(&format!(
@@ -69,7 +83,7 @@ pub fn format_audit_report(summary: &AuditSummary) -> String {
         ));
     }
 
-    out.push_str("[2/4] Bit Independence Criterion (BIC, 512 trials x 2016 bit pairs)\n");
+    out.push_str("[2/6] Bit Independence Criterion (BIC, 512 trials x 2016 bit pairs)\n");
     out.push_str(&format!(
         "  Max |corr| : {:.4} | Avg |corr| : {:.4} -> {}\n\n",
         summary.bic.max_abs_correlation,
@@ -77,7 +91,7 @@ pub fn format_audit_report(summary: &AuditSummary) -> String {
         if summary.bic.passed { "PASS" } else { "FAIL" }
     ));
 
-    out.push_str("[3/4] Bitsliced Chi-5 S-Box Cryptanalysis (Exact DDT & LAT)\n");
+    out.push_str("[3/6] Bitsliced Chi-5 S-Box Cryptanalysis (Exact DDT & LAT)\n");
     out.push_str(&format!(
         "  Bijective  : {} | Diff Uniformity : {} | Max Linear Bias : {} | Nonlinearity : {} -> {}\n",
         summary.sbox.is_bijective,
@@ -90,7 +104,7 @@ pub fn format_audit_report(summary: &AuditSummary) -> String {
 
     let rnd = &summary.randomness;
     out.push_str(&format!(
-        "[4/4] Keystream Statistical Randomness Battery ({} bytes)\n",
+        "[4/6] Keystream Statistical Randomness Battery ({} bytes)\n",
         rnd.sample_bytes
     ));
     out.push_str(&format!(
@@ -117,6 +131,25 @@ pub fn format_audit_report(summary: &AuditSummary) -> String {
         "  Autocorr (lags1-16): {:.5} (< 0.025)      -> {}\n\n",
         rnd.max_autocorr_lag1_16,
         if rnd.autocorr_pass { "PASS" } else { "FAIL" }
+    ));
+
+    out.push_str("[5/6] Related-Key Sensitivity (256 1-bit key flips on WilisAEAD)\n");
+    out.push_str(&format!(
+        "  Ciphertext Flip    : {:.2}% | Tag Flip : {:.2}% -> {}\n\n",
+        summary.key_sensitivity.avg_ct_percent,
+        summary.key_sensitivity.avg_tag_percent,
+        if summary.key_sensitivity.passed { "PASS" } else { "FAIL" }
+    ));
+
+    out.push_str(&format!(
+        "[6/6] Post-Quantum WilisKEM CCA2 Check ({} trials + FO Implicit Rejection)\n",
+        summary.kem_cca2.trials
+    ));
+    out.push_str(&format!(
+        "  Zero Decap Errors  : {} | Implicit Rejection : {} -> {}\n\n",
+        summary.kem_cca2.zero_failures,
+        summary.kem_cca2.implicit_rejection_ok,
+        if summary.kem_cca2.passed { "PASS" } else { "FAIL" }
     ));
 
     out.push_str(&format!(

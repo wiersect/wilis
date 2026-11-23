@@ -1,4 +1,4 @@
-//! C-ABI exported cryptographic functions for `libwilis`.
+//! C-ABI exported cryptographic functions for `libwilis` v0.4.0.
 //!
 //! Return codes:
 //! - `0`: Success (`WILIS_OK`)
@@ -12,7 +12,13 @@ use crate::aead::{open, seal};
 use crate::core::constants::{HASH_BYTES, KEY_BYTES, NONCE_BYTES, SALT_BYTES, TAG_BYTES};
 use crate::hash::hash;
 use crate::kdf::{derive_key, KdfParams};
+use crate::kem::{
+    decapsulate, encapsulate, keygen, KemCiphertext, KemPublicKey, KemSecretKey, KEM_CT_BYTES,
+    KEM_PK_BYTES, KEM_SK_BYTES, KEM_SS_BYTES,
+};
+use crate::mac::mac;
 use crate::utils::random::fill_random;
+use crate::xof::WilisXof;
 
 pub const WILIS_OK: i32 = 0;
 pub const WILIS_ERR_INVALID_ARG: i32 = -1;
@@ -34,7 +40,6 @@ unsafe fn read_slice<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
 ///
 /// # Safety
 /// - `out_32` must point to at least 32 writable bytes.
-/// - If `data_len > 0`, `data` must point to at least `data_len` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn wilis_hash_256(data: *const u8, data_len: usize, out_32: *mut u8) -> i32 {
     if out_32.is_null() {
@@ -49,12 +54,70 @@ pub unsafe extern "C" fn wilis_hash_256(data: *const u8, data_len: usize, out_32
     WILIS_OK
 }
 
-/// Encrypts `pt[..pt_len]` using `WilisAEAD`, writing ciphertext to `ct_out[..pt_len]`
-/// and the 32-byte authentication tag to `tag_32_out`.
+/// Computes a 256-bit keyed `WilisMAC` tag over `msg[..msg_len]` under `key_32`.
+///
+/// # Safety
+/// - `key_32` and `tag_32_out` must point to 32 readable/writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_mac_256(
+    key_32: *const u8,
+    msg: *const u8,
+    msg_len: usize,
+    tag_32_out: *mut u8,
+) -> i32 {
+    if key_32.is_null() || tag_32_out.is_null() {
+        return WILIS_ERR_INVALID_ARG;
+    }
+    let input = match read_slice(msg, msg_len) {
+        Some(s) => s,
+        None => return WILIS_ERR_INVALID_ARG,
+    };
+    let key: [u8; KEY_BYTES] = slice::from_raw_parts(key_32, KEY_BYTES)
+        .try_into()
+        .expect("32 bytes");
+    let tag = mac(&key, input);
+    slice::from_raw_parts_mut(tag_32_out, TAG_BYTES).copy_from_slice(&tag);
+    WILIS_OK
+}
+
+/// Derives `out_len` deterministic pseudorandom bytes via `WilisXOF` from `(label, seed)`.
+///
+/// # Safety
+/// - If `out_len > 0`, `out` must point to at least `out_len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_xof_derive(
+    label: *const u8,
+    label_len: usize,
+    seed: *const u8,
+    seed_len: usize,
+    out: *mut u8,
+    out_len: usize,
+) -> i32 {
+    let label_slice = match read_slice(label, label_len) {
+        Some(s) => s,
+        None => return WILIS_ERR_INVALID_ARG,
+    };
+    let seed_slice = match read_slice(seed, seed_len) {
+        Some(s) => s,
+        None => return WILIS_ERR_INVALID_ARG,
+    };
+    if out_len == 0 {
+        return WILIS_OK;
+    }
+    if out.is_null() {
+        return WILIS_ERR_INVALID_ARG;
+    }
+    let mut xof = WilisXof::new(label_slice);
+    xof.absorb(seed_slice);
+    let out_slice = slice::from_raw_parts_mut(out, out_len);
+    xof.squeeze(out_slice);
+    WILIS_OK
+}
+
+/// Encrypts `pt[..pt_len]` using `WilisAEAD`.
 ///
 /// # Safety
 /// - `key_32`, `nonce_24`, and `tag_32_out` must point to valid 32, 24, and 32-byte buffers.
-/// - If `pt_len > 0`, `pt` and `ct_out` must point to `pt_len` readable/writable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn wilis_aead_seal(
     key_32: *const u8,
@@ -96,13 +159,10 @@ pub unsafe extern "C" fn wilis_aead_seal(
     WILIS_OK
 }
 
-/// Authenticates and decrypts `ct[..ct_len]` using `WilisAEAD`, writing plaintext to `pt_out`.
-///
-/// Returns `WILIS_ERR_AUTH_FAILED (-2)` if authentication fails (leaving `pt_out` untouched/zeroed).
+/// Authenticates and decrypts `ct[..ct_len]` using `WilisAEAD`.
 ///
 /// # Safety
 /// - `key_32`, `nonce_24`, and `tag_32` must point to valid 32, 24, and 32-byte buffers.
-/// - If `ct_len > 0`, `ct` and `pt_out` must point to `ct_len` readable/writable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn wilis_aead_open(
     key_32: *const u8,
@@ -191,6 +251,78 @@ pub unsafe extern "C" fn wilis_kdf_derive(
         }
         Err(_) => WILIS_ERR_INVALID_ARG,
     }
+}
+
+/// Generates a post-quantum `WilisKEM` keypair into `pk_out` (`1284` B) and `sk_out` (`2600` B).
+///
+/// # Safety
+/// - `pk_out` must point to `KEM_PK_BYTES` (1284) and `sk_out` to `KEM_SK_BYTES` (2600) writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_kem_keygen(pk_out: *mut u8, sk_out: *mut u8) -> i32 {
+    if pk_out.is_null() || sk_out.is_null() {
+        return WILIS_ERR_INVALID_ARG;
+    }
+    match keygen() {
+        Ok((sk, pk)) => {
+            slice::from_raw_parts_mut(pk_out, KEM_PK_BYTES).copy_from_slice(&pk.to_bytes());
+            slice::from_raw_parts_mut(sk_out, KEM_SK_BYTES).copy_from_slice(&sk.to_bytes());
+            WILIS_OK
+        }
+        Err(_) => WILIS_ERR_INTERNAL,
+    }
+}
+
+/// Encapsulates a 256-bit shared secret to `pk` (`1284` B), writing `ct_out` (`1668` B) and `ss_out` (`32` B).
+///
+/// # Safety
+/// - Buffers must match `KEM_PK_BYTES`, `KEM_CT_BYTES`, and `KEM_SS_BYTES`.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_kem_encapsulate(
+    pk: *const u8,
+    ct_out: *mut u8,
+    ss_32_out: *mut u8,
+) -> i32 {
+    if pk.is_null() || ct_out.is_null() || ss_32_out.is_null() {
+        return WILIS_ERR_INVALID_ARG;
+    }
+    let pk_obj = match KemPublicKey::from_bytes(slice::from_raw_parts(pk, KEM_PK_BYTES)) {
+        Ok(k) => k,
+        Err(_) => return WILIS_ERR_INVALID_ARG,
+    };
+    match encapsulate(&pk_obj) {
+        Ok((ct, ss)) => {
+            slice::from_raw_parts_mut(ct_out, KEM_CT_BYTES).copy_from_slice(&ct.to_bytes());
+            slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES).copy_from_slice(ss.as_bytes());
+            WILIS_OK
+        }
+        Err(_) => WILIS_ERR_INTERNAL,
+    }
+}
+
+/// Decapsulates `ct` (`1668` B) using `sk` (`2600` B), writing the 256-bit shared secret to `ss_32_out`.
+///
+/// # Safety
+/// - Buffers must match `KEM_SK_BYTES`, `KEM_CT_BYTES`, and `KEM_SS_BYTES`.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_kem_decapsulate(
+    sk: *const u8,
+    ct: *const u8,
+    ss_32_out: *mut u8,
+) -> i32 {
+    if sk.is_null() || ct.is_null() || ss_32_out.is_null() {
+        return WILIS_ERR_INVALID_ARG;
+    }
+    let sk_obj = match KemSecretKey::from_bytes(slice::from_raw_parts(sk, KEM_SK_BYTES)) {
+        Ok(k) => k,
+        Err(_) => return WILIS_ERR_INVALID_ARG,
+    };
+    let ct_obj = match KemCiphertext::from_bytes(slice::from_raw_parts(ct, KEM_CT_BYTES)) {
+        Ok(c) => c,
+        Err(_) => return WILIS_ERR_INVALID_ARG,
+    };
+    let ss = decapsulate(&sk_obj, &ct_obj);
+    slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES).copy_from_slice(ss.as_bytes());
+    WILIS_OK
 }
 
 /// Fills `out[..len]` with cryptographically secure OS random bytes.

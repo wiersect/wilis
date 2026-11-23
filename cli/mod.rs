@@ -1,11 +1,13 @@
-//! Zero-dependency command-line interface for Wilis v0.3.0.
+//! Zero-dependency command-line interface for Wilis v0.4.0.
 
 pub mod args;
 pub mod audit_cmd;
 pub mod bench_cmd;
 pub mod dir_cmd;
 pub mod file_cmd;
+pub mod kem_cmd;
 pub mod keygen_cmd;
+pub mod mac_cmd;
 pub mod sign_cmd;
 pub mod split_cmd;
 pub mod text_cmd;
@@ -55,6 +57,19 @@ pub fn run(raw_args: &[String]) -> Result<()> {
             input_file,
             out_dir,
         } => dir_cmd::run_decrypt_dir(auth, &aad, &input_file, &out_dir),
+        Command::KemKeygen { out_prefix } => kem_cmd::run_kem_keygen(&out_prefix),
+        Command::PubEncrypt {
+            pk_path,
+            aad,
+            input_path,
+            output_path,
+        } => kem_cmd::run_pub_encrypt(&pk_path, &aad, &input_path, &output_path),
+        Command::PubDecrypt {
+            sk_path,
+            aad,
+            input_path,
+            output_path,
+        } => kem_cmd::run_pub_decrypt(&sk_path, &aad, &input_path, &output_path),
         Command::Vault {
             vault_path,
             auth,
@@ -77,6 +92,18 @@ pub fn run(raw_args: &[String]) -> Result<()> {
             threshold,
         } => split_cmd::run_split_key(&secret_hex, total, threshold),
         Command::CombineKey { shares } => split_cmd::run_combine_key(&shares),
+        Command::Mac {
+            key,
+            file_path,
+            text,
+        } => mac_cmd::run_mac(key, file_path.as_deref(), text.as_deref()),
+        Command::MacVerify {
+            key,
+            tag_hex,
+            file_path,
+            text,
+        } => mac_cmd::run_mac_verify(key, &tag_hex, file_path.as_deref(), text.as_deref()),
+        Command::Rand { bytes } => mac_cmd::run_rand(bytes),
         Command::Keygen => keygen_cmd::run_keygen(),
         Command::HashText { text } => keygen_cmd::run_hash_text(&text),
         Command::HashFile { path } => keygen_cmd::run_hash_file(&path),

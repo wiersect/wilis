@@ -62,6 +62,12 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
     }
 
     let file_count = u64::from_le_bytes(hdr[5..13].try_into().expect("8 bytes"));
+    const MAX_ARCHIVE_FILES: u64 = 1_000_000;
+    if file_count > MAX_ARCHIVE_FILES {
+        return Err(WilisError::InvalidFormat(format!(
+            "WDIR file_count {file_count} exceeds safety limit ({MAX_ARCHIVE_FILES})"
+        )));
+    }
     fs::create_dir_all(dest_dir)?;
 
     let mut copy_buf = [0u8; 64 * 1024];
@@ -106,6 +112,14 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
             out_file.write_all(&copy_buf[..to_read])?;
             remaining -= to_read as u64;
         }
+    }
+
+    // Strict canonical check: reject unexpected trailing garbage bytes
+    let mut trailing = [0u8; 1];
+    if reader.read(&mut trailing)? != 0 {
+        return Err(WilisError::InvalidFormat(
+            "unexpected trailing bytes after WDIR archive end".into(),
+        ));
     }
 
     Ok(file_count)

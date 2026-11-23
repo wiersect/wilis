@@ -1,11 +1,11 @@
-//! Scientific cryptanalysis audit & key-commitment security tests for `Wilis`.
+//! Scientific 6-part cryptanalysis audit & key-commitment security tests for `Wilis`.
 
 use wilis::aead::{open, seal};
 use wilis::audit::run_full_audit;
 use wilis::error::WilisError;
 
 #[test]
-fn full_cryptanalysis_audit_passes_all_checks() {
+fn full_cryptanalysis_audit_passes_all_6_checks() {
     let summary = run_full_audit();
 
     assert!(
@@ -20,6 +20,16 @@ fn full_cryptanalysis_audit_passes_all_checks() {
         "Randomness battery failed: {:?}",
         summary.randomness
     );
+    assert!(
+        summary.key_sensitivity.passed,
+        "Related-key sensitivity failed: {:?}",
+        summary.key_sensitivity
+    );
+    assert!(
+        summary.kem_cca2.passed,
+        "Post-quantum KEM CCA2 check failed: {:?}",
+        summary.kem_cca2
+    );
     assert!(summary.overall_pass, "Overall cryptographic audit failed");
 }
 
@@ -33,7 +43,6 @@ fn aead_enforces_key_commitment_across_distinct_keys() {
 
     let (ct, tag) = seal(&key_a, &nonce, b"aad", msg);
 
-    // Distinct key must fail tag verification immediately
     assert!(matches!(
         open(&key_b, &nonce, b"aad", &ct, &tag),
         Err(WilisError::AuthenticationFailed)

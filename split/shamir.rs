@@ -165,6 +165,12 @@ pub fn combine_shares(shares: &[Share]) -> Result<Vec<u8>> {
     let secret_len = shares[0].data.len();
     let expected_cmt = shares[0].commitment;
 
+    if threshold < 2 || secret_len == 0 {
+        return Err(WilisError::InvalidFormat(
+            "invalid share threshold or empty share payload".into(),
+        ));
+    }
+
     if shares.len() < threshold as usize {
         return Err(WilisError::InvalidParameters(format!(
             "insufficient shares: need at least {threshold}, got {}",

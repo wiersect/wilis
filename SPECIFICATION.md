@@ -1,4 +1,4 @@
-# Wilis Cryptographic Specification (v0.3.0)
+# Wilis Cryptographic Specification (v0.4.0)
 
 This document defines the exact mathematical construction and binary container wire formats of the **Wilis** cryptographic suite.
 
@@ -165,3 +165,29 @@ Built exclusively from `WilisHash-256` (`n = 32` bytes), without relying on fact
 
 - **`WDIR` v1:** `[ "WDIR": 4B ][ ver=1: 1B ][ count: u64 LE ]` followed by sorted entries `[ path_len: u32 LE ][ utf8_rel_posix_path ][ file_len: u64 LE ][ file_bytes ]`, streamed through `WILS` v2 AEAD. Unpacking enforces strict path-traversal rejection.
 - **`WVLT` v1:** `[ "WVLT": 4B ][ ver=1: 1B ][ count: u32 LE ]` followed by `[ klen: u32 LE ][ key ][ vlen: u32 LE ][ val ]`, authenticated with `WilisAEAD` (bound AAD `"wilis-vault-v1"`) and saved atomically via sibling `.wils.tmp` rename.
+
+
+---
+
+## 9. Extendable-Output Sponge (`WilisXOF`) & Keyed MAC (`WilisMAC`)
+
+- **`WilisXOF`:** Initializes capacity word $w_5 = \text{DOMAIN\_XOF}$ (`WILS_XOF`), absorbs domain label length + label + arbitrary seed blocks at 128-bit rate ($P_{12}$), transitions with `0x80` padding and $w_5 \leftarrow w_5 \oplus \text{0xFF}$ + $P_{16}$, and squeezes unbounded 16-byte blocks ($P_{12}$).
+- **`WilisMAC`:** Initializes $w_0 = \text{DOMAIN\_MAC}$, XORs 256-bit key into capacity before and after $P_{16}$, absorbs message blocks ($P_{12}$), re-injects key into capacity at finalization ($P_{16}$), and masks both 16-byte squeezed tag halves with the secret key.
+
+---
+
+## 10. Post-Quantum KEM (`WilisKEM`) & Hybrid Public-Key Encryption (`WPKE` v1)
+
+- **Ring:** $R_q = \mathbb{Z}_{7681}[X] / (X^{256} + 1)$, module rank $k = 3$ (768-dimensional Module-LWE), secret/error distribution $\mathrm{CBD}_2$ (coefficients in $\{-2, -1, 0, 1, 2\}$).
+- **Exact Noise Margin:** Inner-product decryption noise has standard deviation $\sigma_z = \sqrt{1537} \approx 39.2$, yielding a $48.98\sigma$ margin below the threshold $\lfloor q/4 \rfloor = 1920$ (negligible failure probability $< 2^{-1700}$).
+- **Canonical 13-bit Packing:** 8 coefficients pack into 13 bytes (`416` bytes/poly). Unpacking rejects any coefficient $\ge 7681$.
+- **Fujisaki-Okamoto IND-CCA2 Transform:** Uses `WilisXOF("WKEM_FO_G1")` to derive $(\bar{k}, \text{coins})$ from $(m \| H(pk))$, verifies exact re-encryption in constant time (`ct_eq`), and branchlessly selects between $K_{\text{ok}}$ (`WKEM_FO_K1`) and implicit rejection key $K_{\text{rej}}$ (`WKEM_FO_R1` using secret $z$).
+- **`WPKE` v1 Packet:** `[ "WPKE": 4B ][ ver=1: 1B ][ kem_ct: 1668B ][ nonce: 24B ][ aead_ct: N ][ tag: 32B ]`, binding the entire prefix + user AAD into `WilisAEAD`.
+
+---
+
+## 11. Forward-Secret Messaging Ratchet (`WilisRatchet`)
+
+- Splits a 256-bit shared root secret via `WilisXOF("WRAT_INIT_V1")` into distinct `(send_chain, recv_chain)` keys.
+- Each message step derives `(next_chain_key, one_time_key, one_time_nonce)` via `WilisXOF("WRAT_STEP_V1")`, immediately overwriting the previous chain key (forward secrecy).
+- Incoming packets verify AEAD authentication on a speculative chain clone before committing state advancement, defeating forged-counter DoS while supporting out-of-order delivery up to `MAX_SKIP_WINDOW = 64` and rejecting all replays.

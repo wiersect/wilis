@@ -7,13 +7,13 @@ use crate::error::{Result, WilisError};
 use crate::kdf::KdfStrength;
 use crate::vault::Vault;
 
-fn extract_pass_auth(auth: AuthInput) -> Result<(String, Option<[u8; 32]>, KdfStrength)> {
+fn extract_pass_auth(auth: &AuthInput) -> Result<(&[u8], Option<&[u8; 32]>, KdfStrength)> {
     match auth {
         AuthInput::Passphrase {
             passphrase,
             keyfile_hash,
             strength,
-        } => Ok((passphrase, keyfile_hash, strength)),
+        } => Ok((passphrase.as_bytes(), keyfile_hash.as_ref(), *strength)),
         AuthInput::RawKey(_) => Err(WilisError::CliUsage(
             "vault commands require passphrase authentication (--pass or --pass-prompt)".into(),
         )),
@@ -22,7 +22,7 @@ fn extract_pass_auth(auth: AuthInput) -> Result<(String, Option<[u8; 32]>, KdfSt
 
 /// Executes a `vault` subcommand against an encrypted `.wils` vault file.
 pub fn run_vault(vault_path: &str, auth: AuthInput, action: VaultAction) -> Result<()> {
-    let (pass, keyfile_hash, strength) = extract_pass_auth(auth)?;
+    let (pass, keyfile_hash, strength) = extract_pass_auth(&auth)?;
     let path = Path::new(vault_path);
 
     match action {
@@ -34,29 +34,22 @@ pub fn run_vault(vault_path: &str, auth: AuthInput, action: VaultAction) -> Resu
                 )));
             }
             let vault = Vault::new();
-            vault.save_encrypted(
-                path,
-                pass.as_bytes(),
-                keyfile_hash.as_ref(),
-                strength.to_params(),
-            )?;
+            vault.save_encrypted(path, pass, keyfile_hash, strength.to_params())?;
             println!("Initialized encrypted WilisVault at '{vault_path}'");
             Ok(())
         }
         VaultAction::Set { name, value } => {
-            let mut vault = Vault::load_encrypted(path, pass.as_bytes(), keyfile_hash.as_ref())?;
+            let mut vault = Vault::load_encrypted(path, pass, keyfile_hash)?;
             vault.set(&name, &value)?;
-            vault.save_encrypted(
-                path,
-                pass.as_bytes(),
-                keyfile_hash.as_ref(),
-                strength.to_params(),
-            )?;
-            println!("Saved secret '{name}' in '{vault_path}' ({} total entries)", vault.len());
+            vault.save_encrypted(path, pass, keyfile_hash, strength.to_params())?;
+            println!(
+                "Saved secret '{name}' in '{vault_path}' ({} total entries)",
+                vault.len()
+            );
             Ok(())
         }
         VaultAction::Get { name } => {
-            let vault = Vault::load_encrypted(path, pass.as_bytes(), keyfile_hash.as_ref())?;
+            let vault = Vault::load_encrypted(path, pass, keyfile_hash)?;
             match vault.get(&name) {
                 Some(val) => {
                     println!("{val}");
@@ -68,7 +61,7 @@ pub fn run_vault(vault_path: &str, auth: AuthInput, action: VaultAction) -> Resu
             }
         }
         VaultAction::List => {
-            let vault = Vault::load_encrypted(path, pass.as_bytes(), keyfile_hash.as_ref())?;
+            let vault = Vault::load_encrypted(path, pass, keyfile_hash)?;
             if vault.is_empty() {
                 println!("(vault is empty)");
             } else {
@@ -79,18 +72,13 @@ pub fn run_vault(vault_path: &str, auth: AuthInput, action: VaultAction) -> Resu
             Ok(())
         }
         VaultAction::Delete { name } => {
-            let mut vault = Vault::load_encrypted(path, pass.as_bytes(), keyfile_hash.as_ref())?;
+            let mut vault = Vault::load_encrypted(path, pass, keyfile_hash)?;
             if !vault.delete(&name) {
                 return Err(WilisError::InvalidFormat(format!(
                     "secret '{name}' not found in vault"
                 )));
             }
-            vault.save_encrypted(
-                path,
-                pass.as_bytes(),
-                keyfile_hash.as_ref(),
-                strength.to_params(),
-            )?;
+            vault.save_encrypted(path, pass, keyfile_hash, strength.to_params())?;
             println!("Deleted secret '{name}' from '{vault_path}'");
             Ok(())
         }

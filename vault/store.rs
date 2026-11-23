@@ -178,3 +178,13 @@ impl Vault {
         Ok(vault)
     }
 }
+
+impl Drop for Vault {
+    fn drop(&mut self) {
+        for val in self.entries.values_mut() {
+            // SAFETY: Overwriting UTF-8 string bytes with 0x00 (valid ASCII NUL) preserves UTF-8 validity.
+            let bytes = unsafe { val.as_bytes_mut() };
+            zeroize_bytes(bytes);
+        }
+    }
+}

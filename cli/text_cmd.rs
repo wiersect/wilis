@@ -10,7 +10,7 @@ use crate::utils::base64::{decode_base64, encode_base64};
 
 /// Encrypts UTF-8 text and prints the Base64-encoded `WILS` container.
 pub fn run_encrypt(auth: AuthInput, aad: &str, plaintext: &str) -> Result<()> {
-    let container = match auth {
+    let container = match &auth {
         AuthInput::Passphrase {
             passphrase,
             keyfile_hash,
@@ -34,7 +34,7 @@ pub fn run_encrypt(auth: AuthInput, aad: &str, plaintext: &str) -> Result<()> {
 /// Decodes a Base64 `WILS` container, verifies authentication, and prints UTF-8 plaintext.
 pub fn run_decrypt(auth: AuthInput, aad: &str, ciphertext_b64: &str) -> Result<()> {
     let container = decode_base64(ciphertext_b64)?;
-    let plaintext = match auth {
+    let plaintext = match &auth {
         AuthInput::Passphrase {
             passphrase,
             keyfile_hash,

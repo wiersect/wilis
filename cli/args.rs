@@ -1,4 +1,4 @@
-//! Command-line argument parser and help text definitions for Wilis v0.3.0.
+//! Command-line argument parser and help text definitions for Wilis v0.4.0.
 
 use crate::core::constants::{HASH_BYTES, KEY_BYTES};
 use crate::error::{Result, WilisError};
@@ -6,9 +6,9 @@ use crate::kdf::KdfStrength;
 use crate::sign::DEFAULT_TREE_HEIGHT;
 use crate::utils::hex::decode_hex;
 use crate::utils::prompt::{hash_keyfile, read_hidden_passphrase};
-use crate::utils::zeroize::SecretKey;
+use crate::utils::zeroize::{zeroize_bytes, SecretKey};
 
-/// Authentication credential supplied on the command line (or via hidden prompt).
+/// Authentication credential supplied on the command line (auto-zeroizes passphrase on drop).
 #[derive(Debug)]
 pub enum AuthInput {
     Passphrase {
@@ -17,6 +17,24 @@ pub enum AuthInput {
         strength: KdfStrength,
     },
     RawKey(SecretKey),
+}
+
+impl Drop for AuthInput {
+    fn drop(&mut self) {
+        if let AuthInput::Passphrase {
+            passphrase,
+            keyfile_hash,
+            ..
+        } = self
+        {
+            // SAFETY: Overwriting UTF-8 bytes with 0x00 preserves UTF-8 validity.
+            let bytes = unsafe { passphrase.as_bytes_mut() };
+            zeroize_bytes(bytes);
+            if let Some(kf) = keyfile_hash {
+                zeroize_bytes(kf);
+            }
+        }
+    }
 }
 
 /// Vault sub-actions.
@@ -67,6 +85,21 @@ pub enum Command {
         input_file: String,
         out_dir: String,
     },
+    KemKeygen {
+        out_prefix: String,
+    },
+    PubEncrypt {
+        pk_path: String,
+        aad: String,
+        input_path: String,
+        output_path: String,
+    },
+    PubDecrypt {
+        sk_path: String,
+        aad: String,
+        input_path: String,
+        output_path: String,
+    },
     Vault {
         vault_path: String,
         auth: AuthInput,
@@ -94,6 +127,20 @@ pub enum Command {
     CombineKey {
         shares: Vec<String>,
     },
+    Mac {
+        key: SecretKey,
+        file_path: Option<String>,
+        text: Option<String>,
+    },
+    MacVerify {
+        key: SecretKey,
+        tag_hex: String,
+        file_path: Option<String>,
+        text: Option<String>,
+    },
+    Rand {
+        bytes: usize,
+    },
     Keygen,
     HashText {
         text: String,
@@ -108,42 +155,42 @@ pub enum Command {
 /// Returns formatted CLI usage documentation.
 pub fn usage_text() -> &'static str {
     "\
-Wilis v0.3.0 — Standalone Hardened Custom Cryptography Suite (WilisPerm-384)
+Wilis v0.4.0 — Standalone Post-Quantum & Symmetric Cryptography Suite (WilisPerm-384)
 
 USAGE:
   wilis <COMMAND> [OPTIONS]
 
-ENCRYPTION & ARCHIVING:
+SYMMETRIC ENCRYPTION & ARCHIVING:
   encrypt-text  (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--strength S] [--aad <T>] <TEXT>
   decrypt-text  (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--aad <T>] <BASE64>
-
   encrypt-file  (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--strength S] [--aad <T>] --in <F> --out <F>
   decrypt-file  (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--aad <T>] --in <F> --out <F>
+  encrypt-dir   (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--strength S] [--aad <T>] --in <DIR> --out <F>
+  decrypt-dir   (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--aad <T>] --in <F> --out <DIR>
 
-  encrypt-dir   (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--strength S] [--aad <T>] --in <DIR> --out <FILE>
-  decrypt-dir   (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--aad <T>] --in <FILE> --out <DIR>
-
-ENCRYPTED SECRET VAULT:
-  vault init    --file <VAULT.wils> (--pass <P> | --pass-prompt) [--keyfile <F>] [--strength S]
-  vault set     --file <VAULT.wils> (--pass <P> | --pass-prompt) [--keyfile <F>] --name <KEY> --value <VAL>
-  vault get     --file <VAULT.wils> (--pass <P> | --pass-prompt) [--keyfile <F>] --name <KEY>
-  vault list    --file <VAULT.wils> (--pass <P> | --pass-prompt) [--keyfile <F>]
-  vault del     --file <VAULT.wils> (--pass <P> | --pass-prompt) [--keyfile <F>] --name <KEY>
+POST-QUANTUM PUBLIC-KEY ENCRYPTION (WilisKEM — Module-LWE 768 IND-CCA2):
+  kem-keygen    --out <PREFIX>                    (writes <PREFIX>.wkp public & <PREFIX>.wks secret)
+  pub-encrypt   --pk <KEY.wkp> [--aad <T>] --in <FILE> --out <FILE.wpke>
+  pub-decrypt   --sk <KEY.wks> [--aad <T>] --in <FILE.wpke> --out <FILE>
 
 POST-QUANTUM DIGITAL SIGNATURES (WilisSign — WOTS+ Merkle Tree):
   sign-keygen   --out <PREFIX> [--height 2..10]   (writes <PREFIX>.wsk and <PREFIX>.wpk)
   sign          --sk <KEY.wsk> --in <FILE> --out <FILE.wsig>
   verify        --pk <KEY.wpk> --in <FILE> --sig <FILE.wsig>
 
-SHAMIR SECRET SHARING (WilisSplit — GF(2^8)):
+ENCRYPTED SECRET VAULT & SHAMIR SECRET SHARING:
+  vault         (init|set|get|list|del) --file <VAULT.wils> (--pass <P> | --pass-prompt) [--keyfile <F>] [--name K --value V]
   split-key     --secret <HEX> --total <N> --threshold <K>
   combine-key   <SHARE_1> <SHARE_2> [...]
 
-UTILITIES & CRYPTANALYSIS:
-  keygen        Generate a fresh 256-bit random hex key & WilisHash-256 Key ID.
+MAC, HASH, RANDOM & CRYPTANALYSIS:
+  mac           --key <64-HEX> (--file <FILE> | <TEXT>)
+  mac-verify    --key <64-HEX> --tag <64-HEX> (--file <FILE> | <TEXT>)
   hash          (--file <FILE> | <TEXT>)
+  keygen        Generate a fresh 256-bit random hex key & WilisHash-256 Key ID.
+  rand          --bytes <N>                       Generate N cryptographically secure random bytes (hex).
   bench         Run bijectivity, avalanche, and AEAD throughput benchmarks.
-  audit         Run full scientific cryptanalysis (SAC, BIC, DDT/LAT, NIST randomness).
+  audit         Run 6-part scientific cryptanalysis (SAC, BIC, DDT/LAT, NIST, Related-Key, KEM CCA2).
   help          Display this usage guide."
 }
 
@@ -164,12 +211,18 @@ pub fn parse_args(args: &[String]) -> Result<Command> {
         "decrypt-file" => parse_io_cmd(&args[1..], IoMode::DecryptFile),
         "encrypt-dir" => parse_io_cmd(&args[1..], IoMode::EncryptDir),
         "decrypt-dir" => parse_io_cmd(&args[1..], IoMode::DecryptDir),
+        "kem-keygen" => parse_kem_keygen(&args[1..]),
+        "pub-encrypt" => parse_pub_enc(&args[1..]),
+        "pub-decrypt" => parse_pub_dec(&args[1..]),
         "vault" => parse_vault_cmd(&args[1..]),
         "sign-keygen" => parse_sign_keygen(&args[1..]),
         "sign" => parse_sign_cmd(&args[1..]),
         "verify" => parse_verify_cmd(&args[1..]),
         "split-key" => parse_split_key(&args[1..]),
         "combine-key" => parse_combine_key(&args[1..]),
+        "mac" => parse_mac_cmd(&args[1..], false),
+        "mac-verify" => parse_mac_cmd(&args[1..], true),
+        "rand" => parse_rand_cmd(&args[1..]),
         "hash" => parse_hash_cmd(&args[1..]),
         unknown => Err(WilisError::CliUsage(format!(
             "unknown command '{unknown}'. Run 'wilis help' for usage."
@@ -399,6 +452,97 @@ fn parse_io_cmd(args: &[String], mode: IoMode) -> Result<Command> {
     })
 }
 
+fn parse_kem_keygen(args: &[String]) -> Result<Command> {
+    let mut out_prefix: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => {
+                i += 1;
+                out_prefix = Some(req_val(args, i, "--out")?);
+            }
+            other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
+        }
+        i += 1;
+    }
+    Ok(Command::KemKeygen {
+        out_prefix: out_prefix
+            .ok_or_else(|| WilisError::CliUsage("kem-keygen requires --out <PREFIX>".into()))?,
+    })
+}
+
+fn parse_pub_enc(args: &[String]) -> Result<Command> {
+    let mut pk: Option<String> = None;
+    let mut aad = String::new();
+    let mut input: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--pk" => {
+                i += 1;
+                pk = Some(req_val(args, i, "--pk")?);
+            }
+            "--aad" => {
+                i += 1;
+                aad = req_val(args, i, "--aad")?;
+            }
+            "--in" => {
+                i += 1;
+                input = Some(req_val(args, i, "--in")?);
+            }
+            "--out" => {
+                i += 1;
+                out = Some(req_val(args, i, "--out")?);
+            }
+            other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
+        }
+        i += 1;
+    }
+    Ok(Command::PubEncrypt {
+        pk_path: pk.ok_or_else(|| WilisError::CliUsage("pub-encrypt requires --pk <KEY.wkp>".into()))?,
+        aad,
+        input_path: input.ok_or_else(|| WilisError::CliUsage("pub-encrypt requires --in <FILE>".into()))?,
+        output_path: out.ok_or_else(|| WilisError::CliUsage("pub-encrypt requires --out <FILE>".into()))?,
+    })
+}
+
+fn parse_pub_dec(args: &[String]) -> Result<Command> {
+    let mut sk: Option<String> = None;
+    let mut aad = String::new();
+    let mut input: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--sk" => {
+                i += 1;
+                sk = Some(req_val(args, i, "--sk")?);
+            }
+            "--aad" => {
+                i += 1;
+                aad = req_val(args, i, "--aad")?;
+            }
+            "--in" => {
+                i += 1;
+                input = Some(req_val(args, i, "--in")?);
+            }
+            "--out" => {
+                i += 1;
+                out = Some(req_val(args, i, "--out")?);
+            }
+            other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
+        }
+        i += 1;
+    }
+    Ok(Command::PubDecrypt {
+        sk_path: sk.ok_or_else(|| WilisError::CliUsage("pub-decrypt requires --sk <KEY.wks>".into()))?,
+        aad,
+        input_path: input.ok_or_else(|| WilisError::CliUsage("pub-decrypt requires --in <FILE>".into()))?,
+        output_path: out.ok_or_else(|| WilisError::CliUsage("pub-decrypt requires --out <FILE>".into()))?,
+    })
+}
+
 fn parse_vault_cmd(args: &[String]) -> Result<Command> {
     if args.is_empty() {
         return Err(WilisError::CliUsage(
@@ -618,6 +762,80 @@ fn parse_combine_key(args: &[String]) -> Result<Command> {
     Ok(Command::CombineKey {
         shares: args.to_vec(),
     })
+}
+
+fn parse_mac_cmd(args: &[String], verify: bool) -> Result<Command> {
+    let mut key: Option<SecretKey> = None;
+    let mut tag_hex: Option<String> = None;
+    let mut file_path: Option<String> = None;
+    let mut text: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--key" => {
+                i += 1;
+                key = Some(parse_raw_key(&req_val(args, i, "--key")?)?);
+            }
+            "--tag" if verify => {
+                i += 1;
+                tag_hex = Some(req_val(args, i, "--tag")?);
+            }
+            "--file" => {
+                i += 1;
+                file_path = Some(req_val(args, i, "--file")?);
+            }
+            other if other.starts_with("--") => {
+                return Err(WilisError::CliUsage(format!("unknown option '{other}'")));
+            }
+            other => {
+                if text.is_some() {
+                    return Err(WilisError::CliUsage(
+                        "unexpected extra positional argument".into(),
+                    ));
+                }
+                text = Some(other.to_string());
+            }
+        }
+        i += 1;
+    }
+
+    let key = key.ok_or_else(|| WilisError::CliUsage("missing required --key <64-HEX>".into()))?;
+    if verify {
+        let tag_hex =
+            tag_hex.ok_or_else(|| WilisError::CliUsage("mac-verify requires --tag <64-HEX>".into()))?;
+        Ok(Command::MacVerify {
+            key,
+            tag_hex,
+            file_path,
+            text,
+        })
+    } else {
+        Ok(Command::Mac {
+            key,
+            file_path,
+            text,
+        })
+    }
+}
+
+fn parse_rand_cmd(args: &[String]) -> Result<Command> {
+    let mut bytes: usize = 32;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bytes" | "-n" => {
+                i += 1;
+                let s = req_val(args, i, "--bytes")?;
+                bytes = s.parse::<usize>().map_err(|_| {
+                    WilisError::CliUsage(format!("invalid --bytes '{s}'"))
+                })?;
+            }
+            other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
+        }
+        i += 1;
+    }
+    Ok(Command::Rand { bytes })
 }
 
 fn parse_hash_cmd(args: &[String]) -> Result<Command> {

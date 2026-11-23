@@ -1,16 +1,8 @@
 """
-Zero-dependency Python 3 binding for the Wilis Cryptography Suite (`libwilis`).
+Zero-dependency Python 3 binding for the Wilis v0.4.0 Cryptography Suite (`libwilis`).
 
 Build the shared library first with:
     cargo build --release
-
-Then use:
-    from wilis_py import Wilis
-    w = Wilis()
-    key = w.random_bytes(32)
-    nonce = w.random_bytes(24)
-    ct, tag = w.aead_seal(key, nonce, b"ctx", b"Hello from Python!")
-    pt = w.aead_open(key, nonce, b"ctx", ct, tag)
 """
 
 from __future__ import annotations
@@ -19,6 +11,11 @@ import ctypes
 import pathlib
 import platform
 from typing import Optional, Tuple
+
+KEM_PK_BYTES = 1284
+KEM_SK_BYTES = 2600
+KEM_CT_BYTES = 1668
+KEM_SS_BYTES = 32
 
 
 class WilisAuthError(Exception):
@@ -48,6 +45,13 @@ def _default_library_path() -> pathlib.Path:
     )
 
 
+def _as_const_buf(data: bytes) -> Tuple[ctypes.c_void_p, int]:
+    if not data:
+        return ctypes.c_void_p(0), 0
+    buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+    return ctypes.cast(buf, ctypes.c_void_p), len(data)
+
+
 class Wilis:
     """High-level Python interface over the native `libwilis` C-ABI."""
 
@@ -58,52 +62,73 @@ class Wilis:
 
     def _bind_signatures(self) -> None:
         c_u8_p = ctypes.POINTER(ctypes.c_uint8)
+        c_vp = ctypes.c_void_p
+        c_sz = ctypes.c_size_t
 
-        self._lib.wilis_hash_256.argtypes = [ctypes.c_char_p, ctypes.c_size_t, c_u8_p]
+        self._lib.wilis_hash_256.argtypes = [c_vp, c_sz, c_u8_p]
         self._lib.wilis_hash_256.restype = ctypes.c_int32
 
-        self._lib.wilis_aead_seal.argtypes = [
-            ctypes.c_char_p,
-            ctypes.c_char_p,
-            ctypes.c_char_p,
-            ctypes.c_size_t,
-            ctypes.c_char_p,
-            ctypes.c_size_t,
-            c_u8_p,
-            c_u8_p,
-        ]
+        self._lib.wilis_mac_256.argtypes = [c_vp, c_vp, c_sz, c_u8_p]
+        self._lib.wilis_mac_256.restype = ctypes.c_int32
+
+        self._lib.wilis_xof_derive.argtypes = [c_vp, c_sz, c_vp, c_sz, c_u8_p, c_sz]
+        self._lib.wilis_xof_derive.restype = ctypes.c_int32
+
+        self._lib.wilis_aead_seal.argtypes = [c_vp, c_vp, c_vp, c_sz, c_vp, c_sz, c_u8_p, c_u8_p]
         self._lib.wilis_aead_seal.restype = ctypes.c_int32
 
-        self._lib.wilis_aead_open.argtypes = [
-            ctypes.c_char_p,
-            ctypes.c_char_p,
-            ctypes.c_char_p,
-            ctypes.c_size_t,
-            ctypes.c_char_p,
-            ctypes.c_size_t,
-            ctypes.c_char_p,
-            c_u8_p,
-        ]
+        self._lib.wilis_aead_open.argtypes = [c_vp, c_vp, c_vp, c_sz, c_vp, c_sz, c_vp, c_u8_p]
         self._lib.wilis_aead_open.restype = ctypes.c_int32
 
-        self._lib.wilis_kdf_derive.argtypes = [
-            ctypes.c_char_p,
-            ctypes.c_size_t,
-            ctypes.c_char_p,
-            ctypes.c_uint32,
-            ctypes.c_uint32,
-            c_u8_p,
-        ]
+        self._lib.wilis_kdf_derive.argtypes = [c_vp, c_sz, c_vp, ctypes.c_uint32, ctypes.c_uint32, c_u8_p]
         self._lib.wilis_kdf_derive.restype = ctypes.c_int32
 
-        self._lib.wilis_random_bytes.argtypes = [c_u8_p, ctypes.c_size_t]
+        self._lib.wilis_kem_keygen.argtypes = [c_u8_p, c_u8_p]
+        self._lib.wilis_kem_keygen.restype = ctypes.c_int32
+
+        self._lib.wilis_kem_encapsulate.argtypes = [c_vp, c_u8_p, c_u8_p]
+        self._lib.wilis_kem_encapsulate.restype = ctypes.c_int32
+
+        self._lib.wilis_kem_decapsulate.argtypes = [c_vp, c_vp, c_u8_p]
+        self._lib.wilis_kem_decapsulate.restype = ctypes.c_int32
+
+        self._lib.wilis_random_bytes.argtypes = [c_u8_p, c_sz]
         self._lib.wilis_random_bytes.restype = ctypes.c_int32
 
     def hash_256(self, data: bytes) -> bytes:
+        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        ptr = ctypes.cast(buf, ctypes.c_void_p) if buf is not None else ctypes.c_void_p(0)
         out = (ctypes.c_uint8 * 32)()
-        rc = self._lib.wilis_hash_256(data, len(data), out)
+        rc = self._lib.wilis_hash_256(ptr, len(data), out)
         if rc != 0:
             raise WilisError(f"wilis_hash_256 failed (rc={rc})")
+        return bytes(out)
+
+    def mac_256(self, key: bytes, message: bytes) -> bytes:
+        if len(key) != 32:
+            raise ValueError("key must be exactly 32 bytes")
+        k_buf = (ctypes.c_uint8 * 32).from_buffer_copy(key)
+        m_buf = (ctypes.c_uint8 * len(message)).from_buffer_copy(message) if message else None
+        m_ptr = ctypes.cast(m_buf, ctypes.c_void_p) if m_buf is not None else ctypes.c_void_p(0)
+        out = (ctypes.c_uint8 * 32)()
+        rc = self._lib.wilis_mac_256(ctypes.cast(k_buf, ctypes.c_void_p), m_ptr, len(message), out)
+        if rc != 0:
+            raise WilisError(f"wilis_mac_256 failed (rc={rc})")
+        return bytes(out)
+
+    def xof_derive(self, label: bytes, seed: bytes, out_len: int) -> bytes:
+        if out_len < 0:
+            raise ValueError("out_len must be non-negative")
+        if out_len == 0:
+            return b""
+        l_buf = (ctypes.c_uint8 * len(label)).from_buffer_copy(label) if label else None
+        s_buf = (ctypes.c_uint8 * len(seed)).from_buffer_copy(seed) if seed else None
+        l_ptr = ctypes.cast(l_buf, ctypes.c_void_p) if l_buf is not None else ctypes.c_void_p(0)
+        s_ptr = ctypes.cast(s_buf, ctypes.c_void_p) if s_buf is not None else ctypes.c_void_p(0)
+        out = (ctypes.c_uint8 * out_len)()
+        rc = self._lib.wilis_xof_derive(l_ptr, len(label), s_ptr, len(seed), out, out_len)
+        if rc != 0:
+            raise WilisError(f"wilis_xof_derive failed (rc={rc})")
         return bytes(out)
 
     def random_bytes(self, length: int) -> bytes:
@@ -126,9 +151,12 @@ class Wilis:
     ) -> bytes:
         if len(salt) != 24:
             raise ValueError("salt must be exactly 24 bytes")
+        p_buf = (ctypes.c_uint8 * len(passphrase)).from_buffer_copy(passphrase) if passphrase else None
+        p_ptr = ctypes.cast(p_buf, ctypes.c_void_p) if p_buf is not None else ctypes.c_void_p(0)
+        s_buf = (ctypes.c_uint8 * 24).from_buffer_copy(salt)
         out = (ctypes.c_uint8 * 32)()
         rc = self._lib.wilis_kdf_derive(
-            passphrase, len(passphrase), salt, memory_blocks, passes, out
+            p_ptr, len(passphrase), ctypes.cast(s_buf, ctypes.c_void_p), memory_blocks, passes, out
         )
         if rc != 0:
             raise WilisError(f"wilis_kdf_derive failed (rc={rc})")
@@ -141,10 +169,23 @@ class Wilis:
             raise ValueError("key must be exactly 32 bytes")
         if len(nonce) != 24:
             raise ValueError("nonce must be exactly 24 bytes")
+        k_buf = (ctypes.c_uint8 * 32).from_buffer_copy(key)
+        n_buf = (ctypes.c_uint8 * 24).from_buffer_copy(nonce)
+        a_buf = (ctypes.c_uint8 * len(aad)).from_buffer_copy(aad) if aad else None
+        p_buf = (ctypes.c_uint8 * len(plaintext)).from_buffer_copy(plaintext) if plaintext else None
+        a_ptr = ctypes.cast(a_buf, ctypes.c_void_p) if a_buf is not None else ctypes.c_void_p(0)
+        p_ptr = ctypes.cast(p_buf, ctypes.c_void_p) if p_buf is not None else ctypes.c_void_p(0)
         ct_buf = (ctypes.c_uint8 * len(plaintext))()
         tag_buf = (ctypes.c_uint8 * 32)()
         rc = self._lib.wilis_aead_seal(
-            key, nonce, aad, len(aad), plaintext, len(plaintext), ct_buf, tag_buf
+            ctypes.cast(k_buf, ctypes.c_void_p),
+            ctypes.cast(n_buf, ctypes.c_void_p),
+            a_ptr,
+            len(aad),
+            p_ptr,
+            len(plaintext),
+            ct_buf,
+            tag_buf,
         )
         if rc != 0:
             raise WilisError(f"wilis_aead_seal failed (rc={rc})")
@@ -159,9 +200,23 @@ class Wilis:
             raise ValueError("nonce must be exactly 24 bytes")
         if len(tag) != 32:
             raise ValueError("tag must be exactly 32 bytes")
+        k_buf = (ctypes.c_uint8 * 32).from_buffer_copy(key)
+        n_buf = (ctypes.c_uint8 * 24).from_buffer_copy(nonce)
+        t_buf = (ctypes.c_uint8 * 32).from_buffer_copy(tag)
+        a_buf = (ctypes.c_uint8 * len(aad)).from_buffer_copy(aad) if aad else None
+        c_buf = (ctypes.c_uint8 * len(ciphertext)).from_buffer_copy(ciphertext) if ciphertext else None
+        a_ptr = ctypes.cast(a_buf, ctypes.c_void_p) if a_buf is not None else ctypes.c_void_p(0)
+        c_ptr = ctypes.cast(c_buf, ctypes.c_void_p) if c_buf is not None else ctypes.c_void_p(0)
         pt_buf = (ctypes.c_uint8 * len(ciphertext))()
         rc = self._lib.wilis_aead_open(
-            key, nonce, aad, len(aad), ciphertext, len(ciphertext), tag, pt_buf
+            ctypes.cast(k_buf, ctypes.c_void_p),
+            ctypes.cast(n_buf, ctypes.c_void_p),
+            a_ptr,
+            len(aad),
+            c_ptr,
+            len(ciphertext),
+            ctypes.cast(t_buf, ctypes.c_void_p),
+            pt_buf,
         )
         if rc == -2:
             raise WilisAuthError("authentication failed")
@@ -169,14 +224,56 @@ class Wilis:
             raise WilisError(f"wilis_aead_open failed (rc={rc})")
         return bytes(pt_buf)
 
+    def kem_keygen(self) -> Tuple[bytes, bytes]:
+        pk_buf = (ctypes.c_uint8 * KEM_PK_BYTES)()
+        sk_buf = (ctypes.c_uint8 * KEM_SK_BYTES)()
+        rc = self._lib.wilis_kem_keygen(pk_buf, sk_buf)
+        if rc != 0:
+            raise WilisError(f"wilis_kem_keygen failed (rc={rc})")
+        return bytes(pk_buf), bytes(sk_buf)
+
+    def kem_encapsulate(self, pk: bytes) -> Tuple[bytes, bytes]:
+        if len(pk) != KEM_PK_BYTES:
+            raise ValueError(f"pk must be {KEM_PK_BYTES} bytes")
+        pk_buf = (ctypes.c_uint8 * KEM_PK_BYTES).from_buffer_copy(pk)
+        ct_buf = (ctypes.c_uint8 * KEM_CT_BYTES)()
+        ss_buf = (ctypes.c_uint8 * KEM_SS_BYTES)()
+        rc = self._lib.wilis_kem_encapsulate(ctypes.cast(pk_buf, ctypes.c_void_p), ct_buf, ss_buf)
+        if rc != 0:
+            raise WilisError(f"wilis_kem_encapsulate failed (rc={rc})")
+        return bytes(ct_buf), bytes(ss_buf)
+
+    def kem_decapsulate(self, sk: bytes, ct: bytes) -> bytes:
+        if len(sk) != KEM_SK_BYTES:
+            raise ValueError(f"sk must be {KEM_SK_BYTES} bytes")
+        if len(ct) != KEM_CT_BYTES:
+            raise ValueError(f"ct must be {KEM_CT_BYTES} bytes")
+        sk_buf = (ctypes.c_uint8 * KEM_SK_BYTES).from_buffer_copy(sk)
+        ct_buf = (ctypes.c_uint8 * KEM_CT_BYTES).from_buffer_copy(ct)
+        ss_buf = (ctypes.c_uint8 * KEM_SS_BYTES)()
+        rc = self._lib.wilis_kem_decapsulate(
+            ctypes.cast(sk_buf, ctypes.c_void_p), ctypes.cast(ct_buf, ctypes.c_void_p), ss_buf
+        )
+        if rc != 0:
+            raise WilisError(f"wilis_kem_decapsulate failed (rc={rc})")
+        return bytes(ss_buf)
+
 
 if __name__ == "__main__":
     w = Wilis()
+    # 1. AEAD + MAC + XOF
     key = w.random_bytes(32)
     nonce = w.random_bytes(24)
-    msg = b"Hello from Wilis Python C-FFI binding!"
+    msg = b"\x00Hello from Wilis v0.4.0 Python C-FFI!\x00"
     ct, tag = w.aead_seal(key, nonce, b"py-aad", msg)
-    pt = w.aead_open(key, nonce, b"py-aad", ct, tag)
-    assert pt == msg
-    print("Python C-FFI self-test: PASS")
-    print("WilisHash-256('Wilis'):", w.hash_256(b"Wilis").hex())
+    assert w.aead_open(key, nonce, b"py-aad", ct, tag) == msg
+    assert len(w.mac_256(key, msg)) == 32
+    assert len(w.xof_derive(b"lbl", key, 96)) == 96
+
+    # 2. Post-Quantum WilisKEM
+    pk, sk = w.kem_keygen()
+    kem_ct, ss1 = w.kem_encapsulate(pk)
+    ss2 = w.kem_decapsulate(sk, kem_ct)
+    assert ss1 == ss2
+
+    print("Python C-FFI v0.4.0 (AEAD + MAC + XOF + Post-Quantum KEM): PASS")

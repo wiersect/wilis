@@ -58,6 +58,15 @@ pub const DOMAIN_KDF: u64 = 0x5749_4C53_5F4B_4446;
 /// Domain separator for WilisHash-256 ("WILS_HSH").
 pub const DOMAIN_HASH: u64 = 0x5749_4C53_5F48_5348;
 
+/// Domain separator for WilisXOF extendable-output sponge ("WILS_XOF").
+pub const DOMAIN_XOF: u64 = 0x5749_4C53_5F58_4F46;
+
+/// Domain separator for WilisMAC keyed 256-bit MAC ("WILS_MAC").
+pub const DOMAIN_MAC: u64 = 0x5749_4C53_5F4D_4143;
+
+/// Domain separator for WilisRatchet forward-secret chain ("WILS_RAT").
+pub const DOMAIN_RATCHET: u64 = 0x5749_4C53_5F52_4154;
+
 /// 32 original 64-bit round constants derived from `frac(p^(1/5))` for the first 32 primes.
 /// Each round consumes two constants: one via XOR on word 0, one via modular addition on word 3.
 pub const ROUND_CONSTANTS: [u64; MAX_ROUNDS * 2] = [
