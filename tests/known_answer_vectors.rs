@@ -206,3 +206,88 @@ fn regression_v043_audit_fixes_verified() {
     .collect();
     assert!(parse_args(&args).is_err());
 }
+
+#[test]
+fn regression_v044_audit_fixes_verified() {
+    use wilis::audit::key_sensitivity::analyze_kem_cca2;
+    use wilis::cli::args::AuthInput;
+    use wilis::cli::file_cmd;
+    use wilis::utils::hex::decode_hex;
+    use wilis::utils::zeroize::{paths_refer_to_same_file, write_secret_file, SecretKey};
+
+    // 1. analyze_kem_cca2(0) must NOT vacuously pass
+    let kem0 = analyze_kem_cca2(0);
+    assert!(!kem0.passed && !kem0.zero_failures && !kem0.implicit_rejection_ok);
+
+    // 2. decode_hex cleanly rejects mid-string corruption
+    assert!(decode_hex("deadbeefZZ").is_err());
+
+    let base = std::env::temp_dir().join(format!("wilis_v044_reg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+
+    // 3. file_cmd::run_decrypt on a directory preserves OS I/O error (NOT misleading "too short")
+    #[cfg(unix)]
+    {
+        use wilis::error::WilisError;
+        let out_p = base.join("out.bin");
+        let err = file_cmd::run_decrypt(
+            AuthInput::RawKey(SecretKey::from_bytes([0x11; 32])),
+            "",
+            base.to_str().unwrap(),
+            out_p.to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, WilisError::Io(_)),
+            "expected WilisError::Io on directory input, got {err:?}"
+        );
+    }
+
+    // 4. Cross-platform atomic write_secret_file + same-file detection + encrypt/decrypt round-trip
+    let orig = base.join("orig.bin");
+    write_secret_file(&orig, b"top-secret-payload").unwrap();
+    assert!(paths_refer_to_same_file(&orig, &orig));
+    let enc = base.join("orig.wils");
+    let dec = base.join("dec.bin");
+
+    file_cmd::run_encrypt(
+        AuthInput::RawKey(SecretKey::from_bytes([0x44; 32])),
+        "",
+        orig.to_str().unwrap(),
+        enc.to_str().unwrap(),
+    )
+    .unwrap();
+    file_cmd::run_decrypt(
+        AuthInput::RawKey(SecretKey::from_bytes([0x44; 32])),
+        "",
+        enc.to_str().unwrap(),
+        dec.to_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&dec).unwrap(), b"top-secret-payload");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        // Decrypted output must have owner-only 0600 permissions
+        let mode = std::fs::metadata(&dec).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "decrypted file mode should be 0600, got {:o}", mode);
+
+        // Hard link must be detected as referring to the same file
+        let hard = base.join("orig_hardlink.bin");
+        std::fs::hard_link(&orig, &hard).unwrap();
+        assert!(paths_refer_to_same_file(&orig, &hard));
+
+        // write_secret_file must refuse writing onto an existing symlink and leave target intact
+        let target = base.join("innocent_target.txt");
+        std::fs::write(&target, b"DO-NOT-TOUCH").unwrap();
+        let sym_dest = base.join("secret_symlink.wks");
+        symlink(&target, &sym_dest).unwrap();
+        assert!(write_secret_file(&sym_dest, b"NEW-SECRET").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"DO-NOT-TOUCH");
+    }
+
+    let _ = std::fs::remove_dir_all(&base);
+}

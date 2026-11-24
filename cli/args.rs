@@ -1,4 +1,4 @@
-//! Command-line argument parser and help text definitions for Wilis v0.4.3.
+//! Command-line argument parser and help text definitions for Wilis v0.4.4.
 
 use crate::core::constants::{HASH_BYTES, KEY_BYTES};
 use crate::error::{Result, WilisError};

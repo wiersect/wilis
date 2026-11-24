@@ -10,7 +10,7 @@ use crate::kdf::KdfParams;
 use crate::stream::{
     encrypt_stream_with_key, encrypt_stream_with_passphrase, DEFAULT_CHUNK_SIZE,
 };
-use crate::utils::zeroize::zeroize_bytes;
+use crate::utils::zeroize::{create_unique_temp_file, zeroize_bytes};
 
 /// Magic header for the custom Wilis directory archive format.
 pub const WDIR_MAGIC: [u8; 4] = *b"WDIR";
@@ -146,12 +146,10 @@ pub fn encrypt_directory_with_key(
             return Err(e);
         }
     };
-    let mut tmp_os = output_file.as_os_str().to_os_string();
-    tmp_os.push(".tmp");
-    let tmp_path = PathBuf::from(tmp_os);
+    let (tmp_path, tmp_file) = create_unique_temp_file(output_file, false)?;
 
     let enc_res = (|| -> Result<u64> {
-        let mut writer = BufWriter::new(File::create(&tmp_path)?);
+        let mut writer = BufWriter::new(tmp_file);
         let (_, out_bytes) = encrypt_stream_with_key(
             key,
             &mut Cursor::new(&packed),
@@ -159,6 +157,8 @@ pub fn encrypt_directory_with_key(
             user_aad,
             DEFAULT_CHUNK_SIZE,
         )?;
+        let file = writer.into_inner().map_err(|e| e.into_error())?;
+        file.sync_all()?;
         Ok(out_bytes)
     })();
     zeroize_bytes(&mut packed);
@@ -197,12 +197,10 @@ pub fn encrypt_directory_with_passphrase(
             return Err(e);
         }
     };
-    let mut tmp_os = output_file.as_os_str().to_os_string();
-    tmp_os.push(".tmp");
-    let tmp_path = PathBuf::from(tmp_os);
+    let (tmp_path, tmp_file) = create_unique_temp_file(output_file, false)?;
 
     let enc_res = (|| -> Result<u64> {
-        let mut writer = BufWriter::new(File::create(&tmp_path)?);
+        let mut writer = BufWriter::new(tmp_file);
         let (_, out_bytes) = encrypt_stream_with_passphrase(
             passphrase,
             keyfile_hash,
@@ -212,6 +210,8 @@ pub fn encrypt_directory_with_passphrase(
             params,
             DEFAULT_CHUNK_SIZE,
         )?;
+        let file = writer.into_inner().map_err(|e| e.into_error())?;
+        file.sync_all()?;
         Ok(out_bytes)
     })();
     zeroize_bytes(&mut packed);

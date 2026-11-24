@@ -168,18 +168,8 @@ impl Vault {
         zeroize_bytes(&mut raw);
         let encrypted = enc_res?;
 
-        // Atomic write via owner-only (0600 on Unix) sibling temporary file
-        let mut tmp_os = path.as_os_str().to_os_string();
-        tmp_os.push(".tmp");
-        let tmp_path = std::path::PathBuf::from(tmp_os);
-        if let Err(e) = write_secret_file(&tmp_path, &encrypted) {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(e);
-        }
-        if let Err(e) = fs::rename(&tmp_path, path) {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(e.into());
-        }
+        // Atomic write via CSPRNG-named O_EXCL sibling temp file (mode 0600 on Unix + sync_all)
+        write_secret_file(path, &encrypted)?;
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-//! Zero-dependency command-line interface for Wilis v0.4.3.
+//! Zero-dependency command-line interface for Wilis v0.4.4.
 
 pub mod args;
 pub mod audit_cmd;
@@ -15,6 +15,7 @@ pub mod vault_cmd;
 
 use crate::cli::args::{parse_args, Command};
 use crate::error::Result;
+use crate::utils::zeroize::zeroize_bytes;
 
 /// Parses CLI arguments and dispatches to the matching command handler.
 pub fn run(raw_args: &[String]) -> Result<()> {
@@ -26,8 +27,13 @@ pub fn run(raw_args: &[String]) -> Result<()> {
         Command::EncryptText {
             auth,
             aad,
-            plaintext,
-        } => text_cmd::run_encrypt(auth, &aad, &plaintext),
+            mut plaintext,
+        } => {
+            let res = text_cmd::run_encrypt(auth, &aad, &plaintext);
+            // SAFETY: Overwriting UTF-8 bytes with 0x00 preserves UTF-8 validity.
+            zeroize_bytes(unsafe { plaintext.as_bytes_mut() });
+            res
+        }
         Command::DecryptText {
             auth,
             aad,
@@ -87,11 +93,23 @@ pub fn run(raw_args: &[String]) -> Result<()> {
             sig_path,
         } => sign_cmd::run_verify_file(&pk_path, &input_path, &sig_path),
         Command::SplitKey {
-            secret_hex,
+            mut secret_hex,
             total,
             threshold,
-        } => split_cmd::run_split_key(&secret_hex, total, threshold),
-        Command::CombineKey { shares } => split_cmd::run_combine_key(&shares),
+        } => {
+            let res = split_cmd::run_split_key(&secret_hex, total, threshold);
+            // SAFETY: Overwriting UTF-8 bytes with 0x00 preserves UTF-8 validity.
+            zeroize_bytes(unsafe { secret_hex.as_bytes_mut() });
+            res
+        }
+        Command::CombineKey { mut shares } => {
+            let res = split_cmd::run_combine_key(&shares);
+            for s in &mut shares {
+                // SAFETY: Overwriting UTF-8 bytes with 0x00 preserves UTF-8 validity.
+                zeroize_bytes(unsafe { s.as_bytes_mut() });
+            }
+            res
+        }
         Command::Mac {
             key,
             file_path,

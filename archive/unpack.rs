@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{BufReader, Cursor, Read, Write};
+use std::io::{self, BufReader, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use crate::archive::pack::{WDIR_MAGIC, WDIR_VERSION};
@@ -123,12 +123,20 @@ fn ensure_no_symlink_components(dest_root: &Path, rel_path: &str) -> Result<()> 
     Ok(())
 }
 
+fn read_exact_or_fmt<R: Read>(reader: &mut R, buf: &mut [u8], eof_msg: &str) -> Result<()> {
+    reader.read_exact(buf).map_err(|e| {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            WilisError::InvalidFormat(eof_msg.to_string())
+        } else {
+            WilisError::Io(e)
+        }
+    })
+}
+
 /// Unpacks a verified `WDIR` v1 byte stream into `dest_dir`, returning extracted file count.
 pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64> {
     let mut hdr = [0u8; 13];
-    reader.read_exact(&mut hdr).map_err(|_| {
-        WilisError::InvalidFormat("truncated WDIR archive header".into())
-    })?;
+    read_exact_or_fmt(reader, &mut hdr, "truncated WDIR archive header")?;
 
     if hdr[0..4] != WDIR_MAGIC || hdr[4] != WDIR_VERSION {
         return Err(WilisError::InvalidFormat(
@@ -158,9 +166,7 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
     let extract_res = (|| -> Result<()> {
         for _ in 0..file_count {
             let mut len_buf = [0u8; 4];
-            reader.read_exact(&mut len_buf).map_err(|_| {
-                WilisError::InvalidFormat("truncated WDIR path length".into())
-            })?;
+            read_exact_or_fmt(reader, &mut len_buf, "truncated WDIR path length")?;
             let path_len = u32::from_le_bytes(len_buf) as usize;
             if path_len == 0 || path_len > 4096 {
                 return Err(WilisError::InvalidFormat(
@@ -169,9 +175,7 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
             }
 
             let mut path_bytes = vec![0u8; path_len];
-            reader.read_exact(&mut path_bytes).map_err(|_| {
-                WilisError::InvalidFormat("truncated WDIR entry path".into())
-            })?;
+            read_exact_or_fmt(reader, &mut path_bytes, "truncated WDIR entry path")?;
             let rel_path = String::from_utf8(path_bytes).map_err(|_| {
                 WilisError::InvalidEncoding("non-UTF-8 path in WDIR archive".into())
             })?;
@@ -185,9 +189,7 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
             ensure_no_symlink_components(dest_dir, &rel_path)?;
 
             let mut size_buf = [0u8; 8];
-            reader.read_exact(&mut size_buf).map_err(|_| {
-                WilisError::InvalidFormat("truncated WDIR file size".into())
-            })?;
+            read_exact_or_fmt(reader, &mut size_buf, "truncated WDIR file size")?;
             let mut remaining = u64::from_le_bytes(size_buf);
 
             if let Some(parent) = target_path.parent() {
@@ -197,9 +199,7 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
             let mut out_file = File::create(&target_path)?;
             while remaining > 0 {
                 let to_read = remaining.min(copy_buf.len() as u64) as usize;
-                reader.read_exact(&mut copy_buf[..to_read]).map_err(|_| {
-                    WilisError::InvalidFormat("truncated WDIR file payload".into())
-                })?;
+                read_exact_or_fmt(reader, &mut copy_buf[..to_read], "truncated WDIR file payload")?;
                 out_file.write_all(&copy_buf[..to_read])?;
                 remaining -= to_read as u64;
             }

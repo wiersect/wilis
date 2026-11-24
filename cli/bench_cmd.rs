@@ -77,12 +77,14 @@ pub fn run_bench() -> Result<()> {
     let pt = open(&key, &nonce, b"bench-aad", &ct, &tag)?;
     let dec_secs = t1.elapsed().as_secs_f64();
 
-    assert_eq!(pt.len(), payload.len());
+    if pt != payload {
+        return Err(WilisError::AuthenticationFailed);
+    }
     let mib = payload.len() as f64 / (1024.0 * 1024.0);
     println!(
         "[3/3] WilisAEAD Throughput      : seal {:.2} MiB/s | open {:.2} MiB/s",
-        mib / enc_secs,
-        mib / dec_secs
+        mib / enc_secs.max(1e-9),
+        mib / dec_secs.max(1e-9)
     );
 
     Ok(())

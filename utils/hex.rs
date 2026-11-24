@@ -1,6 +1,7 @@
 //! Pure-Rust hexadecimal encoder and decoder.
 
-use crate::error::{WilisError, Result};
+use crate::error::{Result, WilisError};
+use crate::utils::zeroize::zeroize_bytes;
 
 const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
@@ -27,8 +28,20 @@ pub fn decode_hex(input: &str) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(bytes.len() / 2);
 
     for pair in bytes.chunks_exact(2) {
-        let hi = decode_nibble(pair[0])?;
-        let lo = decode_nibble(pair[1])?;
+        let hi = match decode_nibble(pair[0]) {
+            Ok(v) => v,
+            Err(e) => {
+                zeroize_bytes(&mut out);
+                return Err(e);
+            }
+        };
+        let lo = match decode_nibble(pair[1]) {
+            Ok(v) => v,
+            Err(e) => {
+                zeroize_bytes(&mut out);
+                return Err(e);
+            }
+        };
         out.push((hi << 4) | lo);
     }
 

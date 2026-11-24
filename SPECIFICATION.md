@@ -1,4 +1,4 @@
-# Wilis Cryptographic Specification (v0.4.3)
+# Wilis Cryptographic Specification (v0.4.4)
 
 This document defines the exact mathematical construction and binary container wire formats of the **Wilis** cryptographic suite.
 
@@ -167,7 +167,7 @@ Built exclusively from `WilisHash-256` (`n = 32` bytes), without relying on fact
 ## 8. Archive (`WDIR` v1) & Vault (`WVLT` v1) Formats
 
 - **`WDIR` v1:** `[ "WDIR": 4B ][ ver=1: 1B ][ count: u64 LE ]` followed by sorted entries `[ path_len: u32 LE ][ utf8_rel_posix_path ][ file_len: u64 LE ][ file_bytes ]`, streamed through `WILS` v2 AEAD. Unpacking enforces strict path-traversal, symlink-escape, duplicate-entry, Windows reserved device name, and trailing-byte rejection.
-- **`WVLT` v1:** `[ "WVLT": 4B ][ ver=1: 1B ][ count: u32 LE ]` followed by `[ klen: u32 LE ][ key ][ vlen: u32 LE ][ val ]`, authenticated with `WilisAEAD` (bound AAD `"wilis-vault-v1"`) and saved atomically via owner-only (`0600` on Unix) sibling `<path>.tmp` rename.
+- **`WVLT` v1:** `[ "WVLT": 4B ][ ver=1: 1B ][ count: u32 LE ]` followed by `[ klen: u32 LE ][ key ][ vlen: u32 LE ][ val ]`, authenticated with `WilisAEAD` (bound AAD `"wilis-vault-v1"`) and saved atomically via a CSPRNG-named `O_EXCL` owner-only (`0600` on Unix) sibling `<path>.wilis-<16hex>.tmp` + `sync_all()` + rename.
 
 
 ---

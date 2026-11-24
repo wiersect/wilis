@@ -65,6 +65,14 @@ pub fn analyze_related_key_sensitivity() -> KeySensitivityResult {
 /// Runs `trials` live post-quantum `WilisKEM` encapsulations/decapsulations and verifies
 /// Fujisaki-Okamoto implicit rejection against tampered ciphertexts.
 pub fn analyze_kem_cca2(trials: usize) -> KemAuditResult {
+    if trials == 0 {
+        return KemAuditResult {
+            trials: 0,
+            zero_failures: false,
+            implicit_rejection_ok: false,
+            passed: false,
+        };
+    }
     let (sk, pk) = match keygen() {
         Ok(pair) => pair,
         Err(_) => {

@@ -1,5 +1,5 @@
 """
-Zero-dependency Python 3 binding for the Wilis v0.4.3 Cryptography Suite (`libwilis`).
+Zero-dependency Python 3 binding for the Wilis v0.4.4 Cryptography Suite (`libwilis`).
 
 Build the shared library first with:
     cargo build --release
@@ -314,7 +314,7 @@ if __name__ == "__main__":
     # 1. AEAD (including empty plaintext/AAD) + MAC + XOF + KDF bounds
     key = w.random_bytes(32)
     nonce = w.random_bytes(24)
-    msg = b"\x00Hello from Wilis v0.4.3 Python C-FFI!\x00"
+    msg = b"\x00Hello from Wilis v0.4.4 Python C-FFI!\x00"
     ct, tag = w.aead_seal(key, nonce, b"py-aad", msg)
     assert w.aead_open(key, nonce, b"py-aad", ct, tag) == msg
     e_ct, e_tag = w.aead_seal(key, nonce, b"", b"")
@@ -337,4 +337,4 @@ if __name__ == "__main__":
     ss2 = w.kem_decapsulate(sk, kem_ct)
     assert ss1 == ss2
 
-    print("Python C-FFI v0.4.3 (AEAD + MAC + XOF + KDF + Post-Quantum KEM): PASS")
+    print("Python C-FFI v0.4.4 (AEAD + MAC + XOF + KDF + Post-Quantum KEM): PASS")

@@ -2,6 +2,16 @@
 
 All notable changes to **Wilis** are documented in this file.
 
+## [0.4.4] - 2026-11-24
+
+### Bug Fixes & Atomic File-Security Hardening (Round 4)
+- **Eliminated Predictable `.tmp` Symlink Attacks & Concurrent Collisions (`utils/zeroize.rs`, `vault/store.rs`, `cli/file_cmd.rs`, `cli/kem_cmd.rs`, `cli/sign_cmd.rs`, `archive/pack.rs`)**: Replaced fixed `.tmp`/`.wilis.tmp` filenames with `create_unique_temp_file` and `write_atomic_file` using CSPRNG 16-hex suffixes + `OpenOptions::create_new(true)` (`O_CREAT | O_EXCL` on Unix, `CREATE_NEW` on Windows) so temp files never follow pre-existing symlinks and never collide across concurrent invocations; added `sync_all()` crash durability before `fs::rename`, enforced Unix `0600` permissions on decrypted outputs (`decrypt-file`, `pub-decrypt`) from birth, and refused writing sensitive files onto existing symlinks.
+- **Hard-Link Detection for In-Place Safety (`utils/zeroize.rs`)**: Extended `paths_refer_to_same_file` on Unix to compare `(dev, ino)` metadata so hard links pointing to the same file are also caught as `--in == --out`.
+- **Audit Edge-Case & Benchmark Fixes (`audit/key_sensitivity.rs`, `audit/randomness.rs`, `cli/bench_cmd.rs`)**: Fixed `analyze_kem_cca2(0)` vacuously reporting `passed: true`; guarded `runs_denom <= 0.0` against `0.0 / 0.0 = NaN` in `analyze_keystream_randomness`; replaced `assert_eq!` panic in `wilis bench` with full plaintext equality check returning `Err` plus `elapsed.max(1e-9)` div-by-zero guard.
+- **Accurate OS I/O Error Propagation (`cli/file_cmd.rs`, `format/header.rs`, `archive/unpack.rs`)**: Distinguished `io::ErrorKind::UnexpectedEof` (truncated format) from real OS errors (such as `EISDIR` when passing a directory path) so filesystem errors are never disguised as truncation errors.
+- **Error-Path Hex & CLI Memory Zeroization (`utils/hex.rs`, `cli/mod.rs`)**: Zeroized partially decoded secret bytes on `decode_hex` failure and wiped CLI `plaintext`, `secret_hex`, and `shares` buffers immediately after command execution.
+- **Regression Suite (`tests/known_answer_vectors.rs`)**: Added `regression_v044_audit_fixes_verified` (**39 / 39 tests**).
+
 ## [0.4.3] - 2026-11-23
 
 ### Bug Fixes, Python FFI Hardening & Locked Known-Answer Test Vectors (Round 3)

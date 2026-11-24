@@ -1,7 +1,7 @@
 //! Binary header serialization and parsing for `WILS` v1 (single-shot) and
 //! `WILS` v2 (chunked streaming) container formats.
 
-use std::io::Read;
+use std::io::{self, Read};
 
 use crate::core::constants::{NONCE_BYTES, SALT_BYTES};
 use crate::error::{Result, WilisError};
@@ -172,8 +172,12 @@ impl ContainerHeader {
     /// returning `(header, exact_serialized_header_bytes)`.
     pub fn read_from<R: Read>(reader: &mut R) -> Result<(Self, Vec<u8>)> {
         let mut prefix = [0u8; 6];
-        reader.read_exact(&mut prefix).map_err(|_| {
-            WilisError::InvalidFormat("truncated stream before header prefix".to_string())
+        reader.read_exact(&mut prefix).map_err(|e| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                WilisError::InvalidFormat("truncated stream before header prefix".to_string())
+            } else {
+                WilisError::Io(e)
+            }
         })?;
 
         if prefix[0..4] != MAGIC_BYTES {
@@ -201,8 +205,12 @@ impl ContainerHeader {
 
         let mut raw = vec![0u8; 6 + remaining];
         raw[0..6].copy_from_slice(&prefix);
-        reader.read_exact(&mut raw[6..]).map_err(|_| {
-            WilisError::InvalidFormat("truncated stream inside container header".to_string())
+        reader.read_exact(&mut raw[6..]).map_err(|e| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                WilisError::InvalidFormat("truncated stream inside container header".to_string())
+            } else {
+                WilisError::Io(e)
+            }
         })?;
 
         let (header, _) = Self::parse(&raw)?;

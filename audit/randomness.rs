@@ -73,7 +73,11 @@ pub fn analyze_keystream_randomness(sample_bytes: usize) -> RandomnessMetrics {
     let pi = ones_ratio;
     let expected_runs = 2.0 * total_bits * pi * (1.0 - pi);
     let runs_denom = 2.0 * (2.0 * total_bits).sqrt() * pi * (1.0 - pi);
-    let runs_z = ((runs as f64 - expected_runs).abs()) / runs_denom;
+    let runs_z = if runs_denom <= 0.0 {
+        f64::INFINITY
+    } else {
+        ((runs as f64 - expected_runs).abs()) / runs_denom
+    };
     let runs_pass = runs_z < 3.29;
 
     // 3. Shannon Entropy (bits per byte; ideal = 8.0000)

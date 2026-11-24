@@ -1,16 +1,16 @@
 //! CLI handlers for `encrypt-file` and `decrypt-file`.
 //!
 //! Safety guarantees:
-//! - Refuses in-place `--in == --out` to prevent accidental file truncation.
+//! - Refuses in-place `--in == --out` (including symlinks & Unix hard links) to prevent data loss.
 //! - Uses constant-memory `WILS` v2 chunked streaming for encryption and supports
 //!   both `WILS` v1 and `WILS` v2 on decryption.
-//! - Writes to a sibling `.tmp` file first and atomically renames onto `output_path`
-//!   ONLY after full authentication succeeds, ensuring existing files at `output_path`
-//!   are never clobbered by a wrong passphrase or tampered container.
+//! - Writes to a CSPRNG-named `O_EXCL` sibling `.tmp` file (never following symlinks),
+//!   calls `sync_all()`, and atomically renames onto `output_path` ONLY after full
+//!   authentication succeeds (preserving pre-existing files on authentication failure).
 
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read};
-use std::path::{Path, PathBuf};
+use std::io::{self, BufReader, BufWriter, Read};
+use std::path::Path;
 
 use crate::cli::args::AuthInput;
 use crate::error::{Result, WilisError};
@@ -22,13 +22,9 @@ use crate::stream::{
     decrypt_stream_with_key, decrypt_stream_with_passphrase, encrypt_stream_with_key,
     encrypt_stream_with_passphrase, DEFAULT_CHUNK_SIZE,
 };
-use crate::utils::zeroize::{paths_refer_to_same_file, zeroize_bytes};
-
-fn sibling_tmp_path(target: &Path) -> PathBuf {
-    let mut os = target.as_os_str().to_os_string();
-    os.push(".wilis.tmp");
-    PathBuf::from(os)
-}
+use crate::utils::zeroize::{
+    create_unique_temp_file, paths_refer_to_same_file, write_atomic_file, zeroize_bytes,
+};
 
 /// Stream-encrypts an arbitrary file into a `WILS` v2 chunked container.
 pub fn run_encrypt(
@@ -45,11 +41,11 @@ pub fn run_encrypt(
         ));
     }
 
-    let tmp_path = sibling_tmp_path(out_p);
+    let (tmp_path, tmp_file) = create_unique_temp_file(out_p, false)?;
     let res = (|| -> Result<(u64, u64)> {
         let mut reader = BufReader::new(File::open(in_p)?);
-        let mut writer = BufWriter::new(File::create(&tmp_path)?);
-        match &auth {
+        let mut writer = BufWriter::new(tmp_file);
+        let counts = match &auth {
             AuthInput::Passphrase {
                 passphrase,
                 keyfile_hash,
@@ -62,15 +58,18 @@ pub fn run_encrypt(
                 aad.as_bytes(),
                 strength.to_params(),
                 DEFAULT_CHUNK_SIZE,
-            ),
+            )?,
             AuthInput::RawKey(key) => encrypt_stream_with_key(
                 key.as_bytes(),
                 &mut reader,
                 &mut writer,
                 aad.as_bytes(),
                 DEFAULT_CHUNK_SIZE,
-            ),
-        }
+            )?,
+        };
+        let file = writer.into_inner().map_err(|e| e.into_error())?;
+        file.sync_all()?;
+        Ok(counts)
     })();
 
     match res {
@@ -107,11 +106,15 @@ pub fn run_decrypt(
         ));
     }
 
-    // Peek first 5 bytes to detect v1 vs v2 container version
+    // Peek first 5 bytes to detect v1 vs v2 container version (preserving real OS I/O errors)
     let mut peek_file = File::open(in_p)?;
     let mut prefix = [0u8; 5];
-    peek_file.read_exact(&mut prefix).map_err(|_| {
-        WilisError::InvalidFormat("input file is too short to be a WILS container".into())
+    peek_file.read_exact(&mut prefix).map_err(|e| {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            WilisError::InvalidFormat("input file is too short to be a WILS container".into())
+        } else {
+            WilisError::Io(e)
+        }
     })?;
     drop(peek_file);
 
@@ -120,8 +123,6 @@ pub fn run_decrypt(
             "invalid magic bytes (expected 'WILS')".into(),
         ));
     }
-
-    let tmp_path = sibling_tmp_path(out_p);
 
     match prefix[4] {
         FORMAT_VERSION => {
@@ -142,16 +143,9 @@ pub fn run_decrypt(
                 }
             };
             let plain_len = plaintext.len();
-            let write_res = fs::write(&tmp_path, &plaintext);
+            let write_res = write_atomic_file(out_p, &plaintext, true);
             zeroize_bytes(&mut plaintext);
-            if let Err(e) = write_res {
-                let _ = fs::remove_file(&tmp_path);
-                return Err(e.into());
-            }
-            if let Err(e) = fs::rename(&tmp_path, out_p) {
-                let _ = fs::remove_file(&tmp_path);
-                return Err(e.into());
-            }
+            write_res?;
             println!(
                 "Decrypted & verified (WILS v1) '{}' ({} bytes) -> '{}' ({plain_len} bytes)",
                 input_path,
@@ -162,10 +156,19 @@ pub fn run_decrypt(
         }
         FORMAT_VERSION_V2 => {
             let in_len = fs::metadata(in_p)?.len();
+            if let Ok(meta) = fs::symlink_metadata(out_p) {
+                if meta.file_type().is_symlink() {
+                    return Err(WilisError::InvalidFormat(format!(
+                        "refusing to write decrypted plaintext onto symlink '{}'",
+                        out_p.display()
+                    )));
+                }
+            }
+            let (tmp_path, tmp_file) = create_unique_temp_file(out_p, true)?;
             let res = (|| -> Result<u64> {
                 let mut reader = BufReader::new(File::open(in_p)?);
-                let mut writer = BufWriter::new(File::create(&tmp_path)?);
-                match &auth {
+                let mut writer = BufWriter::new(tmp_file);
+                let out_bytes = match &auth {
                     AuthInput::Passphrase {
                         passphrase,
                         keyfile_hash,
@@ -176,14 +179,17 @@ pub fn run_decrypt(
                         &mut reader,
                         &mut writer,
                         aad.as_bytes(),
-                    ),
+                    )?,
                     AuthInput::RawKey(key) => decrypt_stream_with_key(
                         key.as_bytes(),
                         &mut reader,
                         &mut writer,
                         aad.as_bytes(),
-                    ),
-                }
+                    )?,
+                };
+                let file = writer.into_inner().map_err(|e| e.into_error())?;
+                file.sync_all()?;
+                Ok(out_bytes)
             })();
 
             match res {

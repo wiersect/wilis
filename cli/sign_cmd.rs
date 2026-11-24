@@ -1,12 +1,14 @@
 //! CLI handlers for post-quantum `WilisSign`: `sign-keygen`, `sign`, and `verify`.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::{Result, WilisError};
 use crate::hash::hash_hex;
 use crate::sign::{Signature, SigningKey, VerifyingKey};
-use crate::utils::zeroize::{paths_refer_to_same_file, write_secret_file, zeroize_bytes};
+use crate::utils::zeroize::{
+    paths_refer_to_same_file, write_atomic_file, write_secret_file, zeroize_bytes,
+};
 
 /// Generates a post-quantum `WilisSign` Merkle keypair and writes `<prefix>.wsk` & `<prefix>.wpk`.
 pub fn run_sign_keygen(out_prefix: &str, height: u8) -> Result<()> {
@@ -20,7 +22,7 @@ pub fn run_sign_keygen(out_prefix: &str, height: u8) -> Result<()> {
     write_sk?;
 
     let pk_bytes = pk.to_bytes();
-    fs::write(&pk_path, &pk_bytes)?;
+    write_atomic_file(Path::new(&pk_path), &pk_bytes, false)?;
 
     let pk_id = &hash_hex(&pk_bytes)[..32];
     println!("Generated Post-Quantum WilisSign Keypair (WOTS+ Merkle Tree, height={height})");
@@ -52,24 +54,14 @@ pub fn run_sign_file(sk_path: &str, input_path: &str, sig_out_path: &str) -> Res
     let message = fs::read(in_p)?;
     let sig = sk.sign(&message)?;
 
-    // Atomically persist updated secret key with 0600 mode BEFORE writing the signature
-    let mut tmp_os = sk_p.as_os_str().to_os_string();
-    tmp_os.push(".tmp");
-    let tmp_sk = PathBuf::from(tmp_os);
+    // Atomically persist updated secret key (O_EXCL + 0600 + sync_all) BEFORE writing signature
     let mut updated_sk_bytes = sk.to_bytes();
-    let write_res = write_secret_file(&tmp_sk, &updated_sk_bytes);
+    let write_res = write_secret_file(sk_p, &updated_sk_bytes);
     zeroize_bytes(&mut updated_sk_bytes);
-    if let Err(e) = write_res {
-        let _ = fs::remove_file(&tmp_sk);
-        return Err(e);
-    }
-    if let Err(e) = fs::rename(&tmp_sk, sk_p) {
-        let _ = fs::remove_file(&tmp_sk);
-        return Err(e.into());
-    }
+    write_res?;
 
     let sig_bytes = sig.to_bytes();
-    fs::write(sig_out_path, &sig_bytes)?;
+    write_atomic_file(out_p, &sig_bytes, false)?;
 
     println!(
         "Signed '{}' -> '{}' ({} bytes, leaf #{}, {} signatures remaining)",

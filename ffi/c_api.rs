@@ -1,4 +1,4 @@
-//! C-ABI exported cryptographic functions for `libwilis` v0.4.3.
+//! C-ABI exported cryptographic functions for `libwilis` v0.4.4.
 //!
 //! Safety & hardening guarantees:
 //! - Every `extern "C"` boundary catches Rust panics via `std::panic::catch_unwind`

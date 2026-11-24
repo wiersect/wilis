@@ -17,7 +17,7 @@
 | **Header / Parameter Downgrade** | Full header bytes (including KDF cost, salt, nonce, chunk size) cryptographically bound into AAD |
 | **File Truncation / Chunk Reordering** | `WILS` v2 per-chunk nonce derivation + `(header_digest, chunk_index, is_final)` binding |
 | **Archive Traversal / Symlink Escape** | `WilisDir` rejects `..`, absolute/colon/reserved Windows paths, duplicate entries, trailing garbage, and existing symlinks inside extraction targets |
-| **Secret Leakage in RAM / Disk / Shell** | Volatile zeroization (`write_volatile` + `compiler_fence`) on drop & error paths, owner-only `0600` Unix permissions on `.wsk`/`.wks`/vault files, hidden `--pass-prompt` |
+| **Secret Leakage in RAM / Disk / Shell** | Volatile zeroization (`write_volatile` + `compiler_fence`) on drop & error paths, CSPRNG `O_EXCL` atomic temp files (`sync_all` + rename, immune to predictable `.tmp` symlink attacks), owner-only `0600` Unix permissions on `.wsk`/`.wks`/vault/decrypted outputs, hidden `--pass-prompt` |
 | **Nonce Collision** | 192-bit random nonces read from native OS CSPRNG (`/dev/urandom` on Unix, `BCryptGenRandom` on Windows) |
 
 ## Reporting Cryptanalytic Findings
