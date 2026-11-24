@@ -1,4 +1,4 @@
-//! Zero-dependency command-line interface for Wilis v0.4.4.
+//! Zero-dependency command-line interface for Wilis v0.4.5.
 
 pub mod args;
 pub mod audit_cmd;

@@ -12,6 +12,11 @@ use crate::utils::zeroize::{
 
 /// Generates a post-quantum `WilisSign` Merkle keypair and writes `<prefix>.wsk` & `<prefix>.wpk`.
 pub fn run_sign_keygen(out_prefix: &str, height: u8) -> Result<()> {
+    if out_prefix.is_empty() || out_prefix.ends_with('/') || out_prefix.ends_with('\\') {
+        return Err(WilisError::InvalidParameters(
+            "key output prefix must be a non-empty file prefix (not a directory)".into(),
+        ));
+    }
     let (sk, pk) = SigningKey::generate(height)?;
     let sk_path = format!("{out_prefix}.wsk");
     let pk_path = format!("{out_prefix}.wpk");

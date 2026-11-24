@@ -2,6 +2,16 @@
 
 All notable changes to **Wilis** are documented in this file.
 
+## [0.4.5] - 2026-11-24
+
+### Bug Fixes & Deep Protocol / Filesystem / CLI Hardening (Round 5)
+- **Canonical `WILS` v2 Stream Framing (`stream/decrypt_stream.rs`)**: Enforced `ct_len == chunk_size` on all non-final chunks (`is_final == false`), blocking non-canonical chunk boundaries and zero-byte non-final chunk CPU DoS attacks.
+- **Case-Insensitive Collision, File-vs-Dir & Permission Hardening in `WilisDir` (`archive/unpack.rs`, `archive/pack.rs`)**: Rejected case-folding duplicate paths (`Secret.txt` vs `secret.txt` on macOS APFS / Windows NTFS) and file-vs-directory prefix conflicts (`a/b` vs `a/b/c.txt`); enforced owner-only `0600` file / `0700` directory Unix modes + `sync_all()` on extraction; rejected existing directory paths as archive output targets up front.
+- **`WilisSign` Merkle Root Consistency Verification (`sign/keypair.rs`)**: Verified `root == build_merkle_tree(secret_seed, pub_seed, height)` in constant time inside `SigningKey::from_bytes`, preventing faulted/corrupted `WSK1` secret keys from burning one-time WOTS+ leaves on unverifiable signatures.
+- **Terminal Escape Injection & Bounds Hardening in `WilisVault` (`vault/store.rs`)**: Rejected control characters (newlines, NUL, ANSI escapes) in vault secret names across `Vault::set` and `Vault::from_bytes` (preventing terminal spoofing in `vault list`) and enforced explicit key/value length caps.
+- **Key-Clobber Prevention, Duplicate-Flag Rejection & `split-key` Secret Zeroization (`cli/args.rs`, `cli/kem_cmd.rs`, `cli/sign_cmd.rs`)**: Blocked overwriting `.wkp`/`.wks` keys in `pub-encrypt`/`pub-decrypt`, blocked overwriting 2FA `--keyfile` via `--out`/`--file`, rejected empty/directory `--out` prefixes in `kem-keygen`/`sign-keygen`, rejected duplicate single-value CLI flags across all commands (preventing flag-shadowing injection), and wrapped `--secret` in `ZeroizeStr` in `parse_split_key`.
+- **32-Bit AAD Capacity Overflow Guards & Regression Suite (`stream/chunk_nonce.rs`, `format/container.rs`, `kem/hybrid.rs`, `ratchet/session.rs`, `tests/known_answer_vectors.rs`)**: Used `saturating_add` in AAD capacity calculations and added `regression_v045_audit_fixes_verified` (**40 / 40 tests**).
+
 ## [0.4.4] - 2026-11-24
 
 ### Bug Fixes & Atomic File-Security Hardening (Round 4)

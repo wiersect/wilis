@@ -291,3 +291,125 @@ fn regression_v044_audit_fixes_verified() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn regression_v045_audit_fixes_verified() {
+    use std::io::Cursor;
+    use wilis::aead::seal;
+    use wilis::archive::unpack_directory;
+    use wilis::cli::kem_cmd;
+    use wilis::sign::SigningKey;
+    use wilis::stream::chunk_nonce::{build_chunk_aad, derive_chunk_nonce};
+    use wilis::stream::decrypt_stream_with_key;
+    use wilis::vault::Vault;
+
+    let base = std::env::temp_dir().join(format!("wilis_v045_reg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+
+    // 1. Canonical WILS v2 stream framing: forge a valid-TAG non-final 0-byte chunk -> MUST reject!
+    let key = [0x61u8; 32];
+    let hdr = ContainerHeader {
+        version: FORMAT_VERSION_V2,
+        mode: KeyMode::RawKey,
+        nonce: [0x22u8; 24],
+        chunk_size: Some(1024),
+    };
+    let hdr_bytes = hdr.to_bytes();
+    let hdr_digest = hash(&hdr_bytes);
+    let c0_nonce = derive_chunk_nonce(&hdr.nonce, 0, false);
+    let c0_aad = build_chunk_aad(&hdr_digest, 0, false, b"");
+    let (_, c0_tag) = seal(&key, &c0_nonce, &c0_aad, b""); // 0-byte non-final chunk!
+    let mut forged_stream = Vec::new();
+    forged_stream.extend_from_slice(&hdr_bytes);
+    forged_stream.extend_from_slice(&0u32.to_le_bytes());
+    forged_stream.push(0u8); // is_final = false with ct_len = 0 != 1024
+    forged_stream.extend_from_slice(&c0_tag);
+    let mut sink = Vec::new();
+    assert!(decrypt_stream_with_key(&key, &mut Cursor::new(&forged_stream), &mut sink, b"").is_err());
+
+    // 2. WilisDir rejects case-folding duplicate ("Secret.txt" vs "secret.txt") & file-vs-dir conflict
+    let mut ci_wdir = Vec::new();
+    ci_wdir.extend_from_slice(b"WDIR\x01");
+    ci_wdir.extend_from_slice(&2u64.to_le_bytes());
+    for name in [b"Secret.txt".as_slice(), b"secret.txt".as_slice()] {
+        ci_wdir.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        ci_wdir.extend_from_slice(name);
+        ci_wdir.extend_from_slice(&1u64.to_le_bytes());
+        ci_wdir.push(b'A');
+    }
+    assert!(unpack_directory(&mut Cursor::new(&ci_wdir), &base.join("ci_out")).is_err());
+
+    let mut conflict_wdir = Vec::new();
+    conflict_wdir.extend_from_slice(b"WDIR\x01");
+    conflict_wdir.extend_from_slice(&2u64.to_le_bytes());
+    for name in [b"sub/item".as_slice(), b"sub/item/nested.txt".as_slice()] {
+        conflict_wdir.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        conflict_wdir.extend_from_slice(name);
+        conflict_wdir.extend_from_slice(&1u64.to_le_bytes());
+        conflict_wdir.push(b'B');
+    }
+    assert!(unpack_directory(&mut Cursor::new(&conflict_wdir), &base.join("conf_out")).is_err());
+
+    // 3. SigningKey::from_bytes rejects corrupted Merkle root EVEN IF outer checksum is recomputed!
+    let (sk, _) = SigningKey::generate(2).unwrap();
+    let mut sk_raw = sk.to_bytes();
+    let root_offset = 9 + 64;
+    sk_raw[root_offset] ^= 0x01; // corrupt Merkle root
+    let body_len = sk_raw.len() - 32;
+    let recomputed_chk = hash(&sk_raw[..body_len]);
+    sk_raw[body_len..].copy_from_slice(&recomputed_chk);
+    assert!(SigningKey::from_bytes(&sk_raw).is_err());
+
+    // 4. Vault rejects control/escape characters in secret names (blocks terminal injection)
+    let mut v = Vault::new();
+    assert!(v.set("bad\nname", "val").is_err());
+    assert!(v.set("ansi\x1b[2J", "val").is_err());
+    assert!(v.set("clean_key", "multiline\nsecret\nvalue").is_ok());
+
+    // 5. CLI rejects duplicate flags, keyfile==out clobber, & pub-encrypt/decrypt key clobber
+    let to_vec = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert!(parse_args(&to_vec(&["encrypt-text", "--pass", "p1", "--pass", "p2", "hi"])).is_err());
+    assert!(parse_args(&to_vec(&["rand", "--bytes", "16", "--bytes", "32"])).is_err());
+
+    let kf_path = base.join("2fa.key");
+    std::fs::write(&kf_path, b"2fa-secret-keyfile").unwrap();
+    assert!(parse_args(&to_vec(&[
+        "encrypt-file",
+        "--pass",
+        "p1",
+        "--keyfile",
+        kf_path.to_str().unwrap(),
+        "--in",
+        "some_in.bin",
+        "--out",
+        kf_path.to_str().unwrap(),
+    ]))
+    .is_err());
+
+    assert!(kem_cmd::run_kem_keygen("").is_err());
+    assert!(kem_cmd::run_kem_keygen("dir/").is_err());
+    let pfx = base.join("alice");
+    kem_cmd::run_kem_keygen(pfx.to_str().unwrap()).unwrap();
+    let wkp = base.join("alice.wkp");
+    let wks = base.join("alice.wks");
+    let sample_in = base.join("msg.bin");
+    std::fs::write(&sample_in, b"hello").unwrap();
+    // Refuses overwriting public key or secret key!
+    assert!(kem_cmd::run_pub_encrypt(
+        wkp.to_str().unwrap(),
+        "",
+        sample_in.to_str().unwrap(),
+        wkp.to_str().unwrap(),
+    )
+    .is_err());
+    assert!(kem_cmd::run_pub_decrypt(
+        wks.to_str().unwrap(),
+        "",
+        sample_in.to_str().unwrap(),
+        wks.to_str().unwrap(),
+    )
+    .is_err());
+
+    let _ = std::fs::remove_dir_all(&base);
+}

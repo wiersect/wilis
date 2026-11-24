@@ -1,4 +1,4 @@
-# Wilis Cryptographic Specification (v0.4.4)
+# Wilis Cryptographic Specification (v0.4.5)
 
 This document defines the exact mathematical construction and binary container wire formats of the **Wilis** cryptographic suite.
 
@@ -136,7 +136,7 @@ Chunk Frame (index = 0, 1, 2, ...):
 ```
 - Per-chunk nonce: `base_nonce ^ (chunk_index LE into bytes 16..24) ^ (0xFF at byte 15 if is_final)`.
 - Per-chunk AAD: `WilisHash-256(header_bytes) || chunk_index_u64_le || is_final_u8 || user_aad_len_u64_le || user_aad`.
-- Decryption rejects missing `is_final = 1` (truncation), any data after `is_final = 1` (append), swapped/duplicated chunks, or any tag mismatch.
+- Decryption rejects non-canonical non-final chunks (`pt_len != chunk_size`), missing `is_final = 1` (truncation), any data after `is_final = 1` (append), swapped/duplicated chunks, or any tag mismatch.
 
 
 ---

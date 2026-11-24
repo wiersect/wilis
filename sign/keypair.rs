@@ -211,6 +211,15 @@ impl SigningKey {
         pub_seed.copy_from_slice(&body[9 + HASH_BYTES..9 + HASH_BYTES * 2]);
         root.copy_from_slice(&body[9 + HASH_BYTES * 2..9 + HASH_BYTES * 3]);
 
+        // Verify stored Merkle root matches (secret_seed, pub_seed, height) to block faulted keys
+        let levels = build_merkle_tree(&secret_seed, &pub_seed, height);
+        if !ct_eq(&root, &levels[height as usize][0]) {
+            zeroize_bytes(&mut secret_seed);
+            return Err(WilisError::InvalidKey(
+                "WilisSign secret key failed Merkle root consistency check".into(),
+            ));
+        }
+
         let sk = Self {
             secret_seed,
             pub_seed,

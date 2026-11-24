@@ -15,6 +15,22 @@ use crate::utils::zeroize::{write_secret_file, zeroize_bytes};
 const VAULT_MAGIC: [u8; 4] = *b"WVLT";
 const VAULT_VERSION: u8 = 1;
 const VAULT_AAD: &[u8] = b"wilis-vault-v1";
+const MAX_VAULT_KEY_BYTES: usize = 4096;
+const MAX_VAULT_VAL_BYTES: usize = 64 * 1024 * 1024;
+
+fn validate_secret_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > MAX_VAULT_KEY_BYTES {
+        return Err(WilisError::InvalidParameters(
+            "vault secret name must be 1..=4096 bytes".into(),
+        ));
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err(WilisError::InvalidParameters(
+            "vault secret name must not contain control characters".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// In-memory representation of a decrypted `WilisVault` secret store.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -33,12 +49,19 @@ impl Vault {
     /// Inserts or updates a secret entry by `name`.
     pub fn set(&mut self, name: impl Into<String>, value: impl Into<String>) -> Result<()> {
         let k = name.into();
-        if k.is_empty() {
+        let mut v = value.into();
+        if let Err(e) = validate_secret_name(&k) {
+            // SAFETY: Overwriting UTF-8 string bytes with 0x00 preserves UTF-8 validity.
+            zeroize_bytes(unsafe { v.as_bytes_mut() });
+            return Err(e);
+        }
+        if v.len() > MAX_VAULT_VAL_BYTES {
+            zeroize_bytes(unsafe { v.as_bytes_mut() });
             return Err(WilisError::InvalidParameters(
-                "vault secret name must not be empty".into(),
+                "vault secret value exceeds 64 MiB safety limit".into(),
             ));
         }
-        if let Some(mut old) = self.entries.insert(k, value.into()) {
+        if let Some(mut old) = self.entries.insert(k, v) {
             // SAFETY: Overwriting UTF-8 string bytes with 0x00 preserves UTF-8 validity.
             zeroize_bytes(unsafe { old.as_bytes_mut() });
         }
@@ -112,14 +135,14 @@ impl Vault {
             }
             let klen = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("4 bytes")) as usize;
             pos += 4;
-            if data.len().saturating_sub(pos) < klen {
-                return Err(WilisError::InvalidFormat("truncated vault key bytes".into()));
+            if klen == 0 || klen > MAX_VAULT_KEY_BYTES || data.len().saturating_sub(pos) < klen {
+                return Err(WilisError::InvalidFormat("invalid or truncated vault key bytes".into()));
             }
             let k = String::from_utf8(data[pos..pos + klen].to_vec())
                 .map_err(|_| WilisError::InvalidEncoding("non-UTF-8 vault key".into()))?;
-            if k.is_empty() {
-                return Err(WilisError::InvalidFormat("empty vault secret name".into()));
-            }
+            validate_secret_name(&k).map_err(|_| {
+                WilisError::InvalidFormat("invalid control character in vault secret name".into())
+            })?;
             pos += klen;
 
             if data.len().saturating_sub(pos) < 4 {
@@ -127,8 +150,8 @@ impl Vault {
             }
             let vlen = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("4 bytes")) as usize;
             pos += 4;
-            if data.len().saturating_sub(pos) < vlen {
-                return Err(WilisError::InvalidFormat("truncated vault value bytes".into()));
+            if vlen > MAX_VAULT_VAL_BYTES || data.len().saturating_sub(pos) < vlen {
+                return Err(WilisError::InvalidFormat("invalid or truncated vault value bytes".into()));
             }
             let v = String::from_utf8(data[pos..pos + vlen].to_vec()).map_err(|err| {
                 let mut raw = err.into_bytes();

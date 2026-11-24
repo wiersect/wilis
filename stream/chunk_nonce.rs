@@ -39,7 +39,7 @@ pub fn build_chunk_aad(
     is_final: bool,
     user_aad: &[u8],
 ) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(HASH_BYTES + 8 + 1 + 8 + user_aad.len());
+    let mut aad = Vec::with_capacity((HASH_BYTES + 8 + 1 + 8).saturating_add(user_aad.len()));
     aad.extend_from_slice(header_digest);
     aad.extend_from_slice(&chunk_index.to_le_bytes());
     aad.push(if is_final { 1 } else { 0 });

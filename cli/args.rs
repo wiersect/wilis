@@ -1,4 +1,6 @@
-//! Command-line argument parser and help text definitions for Wilis v0.4.4.
+//! Command-line argument parser and help text definitions for Wilis v0.4.5.
+
+use std::path::Path;
 
 use crate::core::constants::{HASH_BYTES, KEY_BYTES};
 use crate::error::{Result, WilisError};
@@ -6,7 +8,7 @@ use crate::kdf::KdfStrength;
 use crate::sign::DEFAULT_TREE_HEIGHT;
 use crate::utils::hex::decode_hex;
 use crate::utils::prompt::{hash_keyfile, read_hidden_passphrase};
-use crate::utils::zeroize::{zeroize_bytes, SecretKey};
+use crate::utils::zeroize::{paths_refer_to_same_file, zeroize_bytes, SecretKey};
 
 /// Authentication credential supplied on the command line (auto-zeroizes passphrase on drop).
 #[derive(Debug)]
@@ -278,6 +280,14 @@ fn ensure_no_extra_args(cmd: &str, rest: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn set_once<T>(slot: &mut Option<T>, val: T, flag: &str) -> Result<()> {
+    if slot.is_some() {
+        return Err(WilisError::CliUsage(format!("duplicate option '{flag}'")));
+    }
+    *slot = Some(val);
+    Ok(())
+}
+
 fn parse_raw_key(hex_str: &str) -> Result<SecretKey> {
     let mut bytes = decode_hex(hex_str)?;
     if bytes.len() != KEY_BYTES {
@@ -365,8 +375,8 @@ fn parse_text_cmd(args: &[String], encrypt: bool) -> Result<Command> {
     let mut pass_prompt = false;
     let mut raw_key: Option<SecretKey> = None;
     let mut keyfile: Option<String> = None;
-    let mut strength = KdfStrength::Interactive;
-    let mut aad = String::new();
+    let mut strength: Option<KdfStrength> = None;
+    let mut aad: Option<String> = None;
     let mut positional: Option<String> = None;
 
     let mut i = 0;
@@ -382,36 +392,43 @@ fn parse_text_cmd(args: &[String], encrypt: bool) -> Result<Command> {
                 }
                 "--pass" => {
                     i += 1;
-                    pass = Some(ZeroizeStr(req_val(args, i, "--pass")?));
+                    set_once(&mut pass, ZeroizeStr(req_val(args, i, "--pass")?), "--pass")?;
                     i += 1;
                     continue;
                 }
                 "--pass-prompt" => {
+                    if pass_prompt {
+                        return Err(WilisError::CliUsage("duplicate option '--pass-prompt'".into()));
+                    }
                     pass_prompt = true;
                     i += 1;
                     continue;
                 }
                 "--key" => {
                     i += 1;
-                    raw_key = Some(parse_raw_key(&req_val(args, i, "--key")?)?);
+                    set_once(&mut raw_key, parse_raw_key(&req_val(args, i, "--key")?)?, "--key")?;
                     i += 1;
                     continue;
                 }
                 "--keyfile" => {
                     i += 1;
-                    keyfile = Some(req_val(args, i, "--keyfile")?);
+                    set_once(&mut keyfile, req_val(args, i, "--keyfile")?, "--keyfile")?;
                     i += 1;
                     continue;
                 }
                 "--strength" => {
                     i += 1;
-                    strength = KdfStrength::from_name(&req_val(args, i, "--strength")?)?;
+                    set_once(
+                        &mut strength,
+                        KdfStrength::from_name(&req_val(args, i, "--strength")?)?,
+                        "--strength",
+                    )?;
                     i += 1;
                     continue;
                 }
                 "--aad" => {
                     i += 1;
-                    aad = req_val(args, i, "--aad")?;
+                    set_once(&mut aad, req_val(args, i, "--aad")?, "--aad")?;
                     i += 1;
                     continue;
                 }
@@ -438,7 +455,15 @@ fn parse_text_cmd(args: &[String], encrypt: bool) -> Result<Command> {
         })
     })?;
 
-    let auth = resolve_auth(pass, pass_prompt, raw_key, keyfile, strength, encrypt)?;
+    let auth = resolve_auth(
+        pass,
+        pass_prompt,
+        raw_key,
+        keyfile,
+        strength.unwrap_or(KdfStrength::Interactive),
+        encrypt,
+    )?;
+    let aad = aad.unwrap_or_default();
     if encrypt {
         Ok(Command::EncryptText {
             auth,
@@ -459,8 +484,8 @@ fn parse_io_cmd(args: &[String], mode: IoMode) -> Result<Command> {
     let mut pass_prompt = false;
     let mut raw_key: Option<SecretKey> = None;
     let mut keyfile: Option<String> = None;
-    let mut strength = KdfStrength::Interactive;
-    let mut aad = String::new();
+    let mut strength: Option<KdfStrength> = None;
+    let mut aad: Option<String> = None;
     let mut input_path: Option<String> = None;
     let mut output_path: Option<String> = None;
 
@@ -469,32 +494,41 @@ fn parse_io_cmd(args: &[String], mode: IoMode) -> Result<Command> {
         match args[i].as_str() {
             "--pass" => {
                 i += 1;
-                pass = Some(ZeroizeStr(req_val(args, i, "--pass")?));
+                set_once(&mut pass, ZeroizeStr(req_val(args, i, "--pass")?), "--pass")?;
             }
-            "--pass-prompt" => pass_prompt = true,
+            "--pass-prompt" => {
+                if pass_prompt {
+                    return Err(WilisError::CliUsage("duplicate option '--pass-prompt'".into()));
+                }
+                pass_prompt = true;
+            }
             "--key" => {
                 i += 1;
-                raw_key = Some(parse_raw_key(&req_val(args, i, "--key")?)?);
+                set_once(&mut raw_key, parse_raw_key(&req_val(args, i, "--key")?)?, "--key")?;
             }
             "--keyfile" => {
                 i += 1;
-                keyfile = Some(req_val(args, i, "--keyfile")?);
+                set_once(&mut keyfile, req_val(args, i, "--keyfile")?, "--keyfile")?;
             }
             "--strength" => {
                 i += 1;
-                strength = KdfStrength::from_name(&req_val(args, i, "--strength")?)?;
+                set_once(
+                    &mut strength,
+                    KdfStrength::from_name(&req_val(args, i, "--strength")?)?,
+                    "--strength",
+                )?;
             }
             "--aad" => {
                 i += 1;
-                aad = req_val(args, i, "--aad")?;
+                set_once(&mut aad, req_val(args, i, "--aad")?, "--aad")?;
             }
             "--in" => {
                 i += 1;
-                input_path = Some(req_val(args, i, "--in")?);
+                set_once(&mut input_path, req_val(args, i, "--in")?, "--in")?;
             }
             "--out" => {
                 i += 1;
-                output_path = Some(req_val(args, i, "--out")?);
+                set_once(&mut output_path, req_val(args, i, "--out")?, "--out")?;
             }
             other => {
                 return Err(WilisError::CliUsage(format!("unknown argument '{other}'")));
@@ -508,8 +542,24 @@ fn parse_io_cmd(args: &[String], mode: IoMode) -> Result<Command> {
     let output_path =
         output_path.ok_or_else(|| WilisError::CliUsage("missing required --out <PATH>".into()))?;
 
+    if let Some(ref kf) = keyfile {
+        if paths_refer_to_same_file(Path::new(kf), Path::new(&output_path)) {
+            return Err(WilisError::InvalidParameters(
+                "output path must not overwrite the 2FA keyfile".into(),
+            ));
+        }
+    }
+
     let is_encrypt = matches!(mode, IoMode::EncryptFile | IoMode::EncryptDir);
-    let auth = resolve_auth(pass, pass_prompt, raw_key, keyfile, strength, is_encrypt)?;
+    let auth = resolve_auth(
+        pass,
+        pass_prompt,
+        raw_key,
+        keyfile,
+        strength.unwrap_or(KdfStrength::Interactive),
+        is_encrypt,
+    )?;
+    let aad = aad.unwrap_or_default();
 
     Ok(match mode {
         IoMode::EncryptFile => Command::EncryptFile {
@@ -546,7 +596,7 @@ fn parse_kem_keygen(args: &[String]) -> Result<Command> {
         match args[i].as_str() {
             "--out" => {
                 i += 1;
-                out_prefix = Some(req_val(args, i, "--out")?);
+                set_once(&mut out_prefix, req_val(args, i, "--out")?, "--out")?;
             }
             other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
         }
@@ -560,7 +610,7 @@ fn parse_kem_keygen(args: &[String]) -> Result<Command> {
 
 fn parse_pub_enc(args: &[String]) -> Result<Command> {
     let mut pk: Option<String> = None;
-    let mut aad = String::new();
+    let mut aad: Option<String> = None;
     let mut input: Option<String> = None;
     let mut out: Option<String> = None;
     let mut i = 0;
@@ -568,19 +618,19 @@ fn parse_pub_enc(args: &[String]) -> Result<Command> {
         match args[i].as_str() {
             "--pk" => {
                 i += 1;
-                pk = Some(req_val(args, i, "--pk")?);
+                set_once(&mut pk, req_val(args, i, "--pk")?, "--pk")?;
             }
             "--aad" => {
                 i += 1;
-                aad = req_val(args, i, "--aad")?;
+                set_once(&mut aad, req_val(args, i, "--aad")?, "--aad")?;
             }
             "--in" => {
                 i += 1;
-                input = Some(req_val(args, i, "--in")?);
+                set_once(&mut input, req_val(args, i, "--in")?, "--in")?;
             }
             "--out" => {
                 i += 1;
-                out = Some(req_val(args, i, "--out")?);
+                set_once(&mut out, req_val(args, i, "--out")?, "--out")?;
             }
             other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
         }
@@ -588,7 +638,7 @@ fn parse_pub_enc(args: &[String]) -> Result<Command> {
     }
     Ok(Command::PubEncrypt {
         pk_path: pk.ok_or_else(|| WilisError::CliUsage("pub-encrypt requires --pk <KEY.wkp>".into()))?,
-        aad,
+        aad: aad.unwrap_or_default(),
         input_path: input.ok_or_else(|| WilisError::CliUsage("pub-encrypt requires --in <FILE>".into()))?,
         output_path: out.ok_or_else(|| WilisError::CliUsage("pub-encrypt requires --out <FILE>".into()))?,
     })
@@ -596,7 +646,7 @@ fn parse_pub_enc(args: &[String]) -> Result<Command> {
 
 fn parse_pub_dec(args: &[String]) -> Result<Command> {
     let mut sk: Option<String> = None;
-    let mut aad = String::new();
+    let mut aad: Option<String> = None;
     let mut input: Option<String> = None;
     let mut out: Option<String> = None;
     let mut i = 0;
@@ -604,19 +654,19 @@ fn parse_pub_dec(args: &[String]) -> Result<Command> {
         match args[i].as_str() {
             "--sk" => {
                 i += 1;
-                sk = Some(req_val(args, i, "--sk")?);
+                set_once(&mut sk, req_val(args, i, "--sk")?, "--sk")?;
             }
             "--aad" => {
                 i += 1;
-                aad = req_val(args, i, "--aad")?;
+                set_once(&mut aad, req_val(args, i, "--aad")?, "--aad")?;
             }
             "--in" => {
                 i += 1;
-                input = Some(req_val(args, i, "--in")?);
+                set_once(&mut input, req_val(args, i, "--in")?, "--in")?;
             }
             "--out" => {
                 i += 1;
-                out = Some(req_val(args, i, "--out")?);
+                set_once(&mut out, req_val(args, i, "--out")?, "--out")?;
             }
             other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
         }
@@ -624,7 +674,7 @@ fn parse_pub_dec(args: &[String]) -> Result<Command> {
     }
     Ok(Command::PubDecrypt {
         sk_path: sk.ok_or_else(|| WilisError::CliUsage("pub-decrypt requires --sk <KEY.wks>".into()))?,
-        aad,
+        aad: aad.unwrap_or_default(),
         input_path: input.ok_or_else(|| WilisError::CliUsage("pub-decrypt requires --in <FILE>".into()))?,
         output_path: out.ok_or_else(|| WilisError::CliUsage("pub-decrypt requires --out <FILE>".into()))?,
     })
@@ -641,7 +691,7 @@ fn parse_vault_cmd(args: &[String]) -> Result<Command> {
     let mut pass: Option<ZeroizeStr> = None;
     let mut pass_prompt = false;
     let mut keyfile: Option<String> = None;
-    let mut strength = KdfStrength::Interactive;
+    let mut strength: Option<KdfStrength> = None;
     let mut name: Option<String> = None;
     let mut value: Option<ZeroizeStr> = None;
 
@@ -650,28 +700,37 @@ fn parse_vault_cmd(args: &[String]) -> Result<Command> {
         match args[i].as_str() {
             "--file" => {
                 i += 1;
-                vault_file = Some(req_val(args, i, "--file")?);
+                set_once(&mut vault_file, req_val(args, i, "--file")?, "--file")?;
             }
             "--pass" => {
                 i += 1;
-                pass = Some(ZeroizeStr(req_val(args, i, "--pass")?));
+                set_once(&mut pass, ZeroizeStr(req_val(args, i, "--pass")?), "--pass")?;
             }
-            "--pass-prompt" => pass_prompt = true,
+            "--pass-prompt" => {
+                if pass_prompt {
+                    return Err(WilisError::CliUsage("duplicate option '--pass-prompt'".into()));
+                }
+                pass_prompt = true;
+            }
             "--keyfile" => {
                 i += 1;
-                keyfile = Some(req_val(args, i, "--keyfile")?);
+                set_once(&mut keyfile, req_val(args, i, "--keyfile")?, "--keyfile")?;
             }
             "--strength" => {
                 i += 1;
-                strength = KdfStrength::from_name(&req_val(args, i, "--strength")?)?;
+                set_once(
+                    &mut strength,
+                    KdfStrength::from_name(&req_val(args, i, "--strength")?)?,
+                    "--strength",
+                )?;
             }
             "--name" => {
                 i += 1;
-                name = Some(req_val(args, i, "--name")?);
+                set_once(&mut name, req_val(args, i, "--name")?, "--name")?;
             }
             "--value" => {
                 i += 1;
-                value = Some(ZeroizeStr(req_val(args, i, "--value")?));
+                set_once(&mut value, ZeroizeStr(req_val(args, i, "--value")?), "--value")?;
             }
             other => {
                 return Err(WilisError::CliUsage(format!("unknown vault option '{other}'")));
@@ -682,6 +741,13 @@ fn parse_vault_cmd(args: &[String]) -> Result<Command> {
 
     let vault_path = vault_file
         .ok_or_else(|| WilisError::CliUsage("missing required --file <VAULT.wils>".into()))?;
+    if let Some(ref kf) = keyfile {
+        if paths_refer_to_same_file(Path::new(kf), Path::new(&vault_path)) {
+            return Err(WilisError::InvalidParameters(
+                "vault file path must not overwrite the 2FA keyfile".into(),
+            ));
+        }
+    }
     let action = match sub {
         "init" => {
             if name.is_some() || value.is_some() {
@@ -733,7 +799,14 @@ fn parse_vault_cmd(args: &[String]) -> Result<Command> {
     };
 
     let confirm_pass = matches!(action, VaultAction::Init);
-    let auth = resolve_auth(pass, pass_prompt, None, keyfile, strength, confirm_pass)?;
+    let auth = resolve_auth(
+        pass,
+        pass_prompt,
+        None,
+        keyfile,
+        strength.unwrap_or(KdfStrength::Interactive),
+        confirm_pass,
+    )?;
     Ok(Command::Vault {
         vault_path,
         auth,
@@ -743,20 +816,21 @@ fn parse_vault_cmd(args: &[String]) -> Result<Command> {
 
 fn parse_sign_keygen(args: &[String]) -> Result<Command> {
     let mut out_prefix: Option<String> = None;
-    let mut height = DEFAULT_TREE_HEIGHT;
+    let mut height: Option<u8> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--out" => {
                 i += 1;
-                out_prefix = Some(req_val(args, i, "--out")?);
+                set_once(&mut out_prefix, req_val(args, i, "--out")?, "--out")?;
             }
             "--height" => {
                 i += 1;
                 let s = req_val(args, i, "--height")?;
-                height = s.parse::<u8>().map_err(|_| {
+                let h = s.parse::<u8>().map_err(|_| {
                     WilisError::CliUsage(format!("invalid --height '{s}' (expected integer 2..10)"))
                 })?;
+                set_once(&mut height, h, "--height")?;
             }
             other => {
                 return Err(WilisError::CliUsage(format!("unknown option '{other}'")));
@@ -766,7 +840,10 @@ fn parse_sign_keygen(args: &[String]) -> Result<Command> {
     }
     let out_prefix =
         out_prefix.ok_or_else(|| WilisError::CliUsage("sign-keygen requires --out <PREFIX>".into()))?;
-    Ok(Command::SignKeygen { out_prefix, height })
+    Ok(Command::SignKeygen {
+        out_prefix,
+        height: height.unwrap_or(DEFAULT_TREE_HEIGHT),
+    })
 }
 
 fn parse_sign_cmd(args: &[String]) -> Result<Command> {
@@ -778,15 +855,15 @@ fn parse_sign_cmd(args: &[String]) -> Result<Command> {
         match args[i].as_str() {
             "--sk" => {
                 i += 1;
-                sk = Some(req_val(args, i, "--sk")?);
+                set_once(&mut sk, req_val(args, i, "--sk")?, "--sk")?;
             }
             "--in" => {
                 i += 1;
-                input = Some(req_val(args, i, "--in")?);
+                set_once(&mut input, req_val(args, i, "--in")?, "--in")?;
             }
             "--out" => {
                 i += 1;
-                out = Some(req_val(args, i, "--out")?);
+                set_once(&mut out, req_val(args, i, "--out")?, "--out")?;
             }
             other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
         }
@@ -809,15 +886,15 @@ fn parse_verify_cmd(args: &[String]) -> Result<Command> {
         match args[i].as_str() {
             "--pk" => {
                 i += 1;
-                pk = Some(req_val(args, i, "--pk")?);
+                set_once(&mut pk, req_val(args, i, "--pk")?, "--pk")?;
             }
             "--in" => {
                 i += 1;
-                input = Some(req_val(args, i, "--in")?);
+                set_once(&mut input, req_val(args, i, "--in")?, "--in")?;
             }
             "--sig" => {
                 i += 1;
-                sig = Some(req_val(args, i, "--sig")?);
+                set_once(&mut sig, req_val(args, i, "--sig")?, "--sig")?;
             }
             other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
         }
@@ -833,7 +910,7 @@ fn parse_verify_cmd(args: &[String]) -> Result<Command> {
 }
 
 fn parse_split_key(args: &[String]) -> Result<Command> {
-    let mut secret_hex: Option<String> = None;
+    let mut secret_hex: Option<ZeroizeStr> = None;
     let mut total: Option<u8> = None;
     let mut threshold: Option<u8> = None;
     let mut i = 0;
@@ -841,32 +918,42 @@ fn parse_split_key(args: &[String]) -> Result<Command> {
         match args[i].as_str() {
             "--secret" => {
                 i += 1;
-                secret_hex = Some(req_val(args, i, "--secret")?);
+                set_once(
+                    &mut secret_hex,
+                    ZeroizeStr(req_val(args, i, "--secret")?),
+                    "--secret",
+                )?;
             }
             "--total" | "-n" => {
                 i += 1;
                 let s = req_val(args, i, "--total")?;
-                total = Some(s.parse::<u8>().map_err(|_| {
+                let v = s.parse::<u8>().map_err(|_| {
                     WilisError::CliUsage(format!("invalid --total '{s}' (expected 2..=255)"))
-                })?);
+                })?;
+                set_once(&mut total, v, "--total")?;
             }
             "--threshold" | "-k" => {
                 i += 1;
                 let s = req_val(args, i, "--threshold")?;
-                threshold = Some(s.parse::<u8>().map_err(|_| {
+                let v = s.parse::<u8>().map_err(|_| {
                     WilisError::CliUsage(format!("invalid --threshold '{s}' (expected 2..=255)"))
-                })?);
+                })?;
+                set_once(&mut threshold, v, "--threshold")?;
             }
             other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
         }
         i += 1;
     }
+    let total = total.ok_or_else(|| WilisError::CliUsage("split-key requires --total <N>".into()))?;
+    let threshold = threshold
+        .ok_or_else(|| WilisError::CliUsage("split-key requires --threshold <K>".into()))?;
+    let secret_hex = secret_hex
+        .ok_or_else(|| WilisError::CliUsage("split-key requires --secret <HEX>".into()))?
+        .into_inner();
     Ok(Command::SplitKey {
-        secret_hex: secret_hex
-            .ok_or_else(|| WilisError::CliUsage("split-key requires --secret <HEX>".into()))?,
-        total: total.ok_or_else(|| WilisError::CliUsage("split-key requires --total <N>".into()))?,
-        threshold: threshold
-            .ok_or_else(|| WilisError::CliUsage("split-key requires --threshold <K>".into()))?,
+        secret_hex,
+        total,
+        threshold,
     })
 }
 
@@ -900,19 +987,19 @@ fn parse_mac_cmd(args: &[String], verify: bool) -> Result<Command> {
                 }
                 "--key" => {
                     i += 1;
-                    key = Some(parse_raw_key(&req_val(args, i, "--key")?)?);
+                    set_once(&mut key, parse_raw_key(&req_val(args, i, "--key")?)?, "--key")?;
                     i += 1;
                     continue;
                 }
                 "--tag" if verify => {
                     i += 1;
-                    tag_hex = Some(req_val(args, i, "--tag")?);
+                    set_once(&mut tag_hex, req_val(args, i, "--tag")?, "--tag")?;
                     i += 1;
                     continue;
                 }
                 "--file" => {
                     i += 1;
-                    file_path = Some(req_val(args, i, "--file")?);
+                    set_once(&mut file_path, req_val(args, i, "--file")?, "--file")?;
                     i += 1;
                     continue;
                 }
@@ -957,22 +1044,25 @@ fn parse_mac_cmd(args: &[String], verify: bool) -> Result<Command> {
 }
 
 fn parse_rand_cmd(args: &[String]) -> Result<Command> {
-    let mut bytes: usize = 32;
+    let mut bytes: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--bytes" | "-n" => {
                 i += 1;
                 let s = req_val(args, i, "--bytes")?;
-                bytes = s.parse::<usize>().map_err(|_| {
+                let b = s.parse::<usize>().map_err(|_| {
                     WilisError::CliUsage(format!("invalid --bytes '{s}'"))
                 })?;
+                set_once(&mut bytes, b, "--bytes")?;
             }
             other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
         }
         i += 1;
     }
-    Ok(Command::Rand { bytes })
+    Ok(Command::Rand {
+        bytes: bytes.unwrap_or(32),
+    })
 }
 
 fn parse_hash_cmd(args: &[String]) -> Result<Command> {

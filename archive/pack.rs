@@ -10,7 +10,7 @@ use crate::kdf::KdfParams;
 use crate::stream::{
     encrypt_stream_with_key, encrypt_stream_with_passphrase, DEFAULT_CHUNK_SIZE,
 };
-use crate::utils::zeroize::{create_unique_temp_file, zeroize_bytes};
+use crate::utils::zeroize::{create_unique_temp_file, paths_refer_to_same_file, zeroize_bytes};
 
 /// Magic header for the custom Wilis directory archive format.
 pub const WDIR_MAGIC: [u8; 4] = *b"WDIR";
@@ -110,6 +110,11 @@ fn collect_files(
 }
 
 fn validate_output_outside_source(source_dir: &Path, output_file: &Path) -> Result<()> {
+    if output_file.is_dir() || paths_refer_to_same_file(source_dir, output_file) {
+        return Err(WilisError::InvalidParameters(
+            "output archive path must not be an existing directory or the source directory".into(),
+        ));
+    }
     if let Ok(canon_src) = fs::canonicalize(source_dir) {
         if let Some(parent) = output_file.parent() {
             let check_parent = if parent.as_os_str().is_empty() {

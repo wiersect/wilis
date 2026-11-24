@@ -114,7 +114,9 @@ fn decrypt_stream_core<R: Read, W: Write>(
             _ => return Err(WilisError::AuthenticationFailed),
         };
 
-        if ct_len > chunk_size {
+        // Canonical WILS v2 framing: non-final chunks must equal `chunk_size` exactly,
+        // and final chunks must satisfy `0 <= ct_len <= chunk_size`.
+        if (!is_final && ct_len != chunk_size) || ct_len > chunk_size {
             return Err(WilisError::AuthenticationFailed);
         }
 

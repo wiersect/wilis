@@ -11,8 +11,18 @@ use crate::utils::zeroize::{
     paths_refer_to_same_file, write_atomic_file, write_secret_file, zeroize_bytes,
 };
 
+fn validate_key_prefix(out_prefix: &str) -> Result<()> {
+    if out_prefix.is_empty() || out_prefix.ends_with('/') || out_prefix.ends_with('\\') {
+        return Err(WilisError::InvalidParameters(
+            "key output prefix must be a non-empty file prefix (not a directory)".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Generates a post-quantum `WilisKEM` keypair (`<prefix>.wkp` public, `<prefix>.wks` secret).
 pub fn run_kem_keygen(out_prefix: &str) -> Result<()> {
+    validate_key_prefix(out_prefix)?;
     let (sk, pk) = keygen()?;
     let pk_path = format!("{out_prefix}.wkp");
     let sk_path = format!("{out_prefix}.wks");
@@ -37,11 +47,12 @@ pub fn run_kem_keygen(out_prefix: &str) -> Result<()> {
 
 /// Encrypts a file directly to a recipient's post-quantum `WKP1` public key (`WPKE` v1).
 pub fn run_pub_encrypt(pk_path: &str, aad: &str, input_path: &str, output_path: &str) -> Result<()> {
+    let pk_p = Path::new(pk_path);
     let in_p = Path::new(input_path);
     let out_p = Path::new(output_path);
-    if paths_refer_to_same_file(in_p, out_p) {
+    if paths_refer_to_same_file(in_p, out_p) || paths_refer_to_same_file(pk_p, out_p) {
         return Err(WilisError::InvalidParameters(
-            "input and output paths must not refer to the same file".into(),
+            "output path must not overwrite the input file or public key".into(),
         ));
     }
 
@@ -66,11 +77,12 @@ pub fn run_pub_encrypt(pk_path: &str, aad: &str, input_path: &str, output_path: 
 
 /// Authenticates and decrypts a `WPKE` v1 file using the recipient's `WKS1` secret key.
 pub fn run_pub_decrypt(sk_path: &str, aad: &str, input_path: &str, output_path: &str) -> Result<()> {
+    let sk_p = Path::new(sk_path);
     let in_p = Path::new(input_path);
     let out_p = Path::new(output_path);
-    if paths_refer_to_same_file(in_p, out_p) {
+    if paths_refer_to_same_file(in_p, out_p) || paths_refer_to_same_file(sk_p, out_p) {
         return Err(WilisError::InvalidParameters(
-            "input and output paths must not refer to the same file".into(),
+            "output path must not overwrite the input file or secret key".into(),
         ));
     }
 

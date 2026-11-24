@@ -9,7 +9,7 @@ use crate::utils::random::{generate_nonce, generate_salt};
 
 /// Builds the full authenticated AAD binding the serialized header and optional user AAD.
 fn build_bound_aad(header_bytes: &[u8], user_aad: &[u8]) -> Vec<u8> {
-    let mut bound = Vec::with_capacity(header_bytes.len() + 8 + user_aad.len());
+    let mut bound = Vec::with_capacity(header_bytes.len().saturating_add(8).saturating_add(user_aad.len()));
     bound.extend_from_slice(header_bytes);
     bound.extend_from_slice(&(user_aad.len() as u64).to_le_bytes());
     bound.extend_from_slice(user_aad);

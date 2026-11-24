@@ -2,7 +2,7 @@
 //! and cross-platform path-traversal protection.
 
 use std::collections::HashSet;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -123,6 +123,18 @@ fn ensure_no_symlink_components(dest_root: &Path, rel_path: &str) -> Result<()> 
     Ok(())
 }
 
+fn create_secure_dir_all(dir: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)?;
+    Ok(())
+}
+
 fn read_exact_or_fmt<R: Read>(reader: &mut R, buf: &mut [u8], eof_msg: &str) -> Result<()> {
     reader.read_exact(buf).map_err(|e| {
         if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -157,11 +169,19 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
                 "destination directory must not be a symlink".into(),
             ));
         }
+        if !meta.file_type().is_dir() {
+            return Err(WilisError::InvalidFormat(
+                "destination path exists and is not a directory".into(),
+            ));
+        }
     }
-    fs::create_dir_all(dest_dir)?;
+    create_secure_dir_all(dest_dir)?;
 
     let mut copy_buf = [0u8; 64 * 1024];
-    let mut seen_paths: HashSet<String> = HashSet::new();
+    // Track case-folded file and directory paths to prevent case-insensitive overwrites
+    // (macOS APFS / Windows NTFS) and file-vs-directory prefix collisions.
+    let mut seen_files_ci: HashSet<String> = HashSet::new();
+    let mut seen_dirs_ci: HashSet<String> = HashSet::new();
 
     let extract_res = (|| -> Result<()> {
         for _ in 0..file_count {
@@ -181,11 +201,30 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
             })?;
 
             let target_path = sanitize_archive_path(dest_dir, &rel_path)?;
-            if !seen_paths.insert(rel_path.clone()) {
+            let norm_ci = Path::new(&rel_path)
+                .components()
+                .filter_map(|c| match c {
+                    Component::Normal(p) => p.to_str().map(|s| s.to_ascii_lowercase()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            let full_ci = norm_ci.join("/");
+            if seen_dirs_ci.contains(&full_ci) || !seen_files_ci.insert(full_ci) {
                 return Err(WilisError::InvalidFormat(format!(
-                    "duplicate entry path rejected in WDIR archive: '{rel_path}'"
+                    "duplicate or conflicting entry path rejected in WDIR archive: '{rel_path}'"
                 )));
             }
+            for depth in 1..norm_ci.len() {
+                let prefix_ci = norm_ci[..depth].join("/");
+                if seen_files_ci.contains(&prefix_ci) {
+                    return Err(WilisError::InvalidFormat(format!(
+                        "file-vs-directory path conflict rejected in WDIR archive: '{rel_path}'"
+                    )));
+                }
+                seen_dirs_ci.insert(prefix_ci);
+            }
+
             ensure_no_symlink_components(dest_dir, &rel_path)?;
 
             let mut size_buf = [0u8; 8];
@@ -193,16 +232,29 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
             let mut remaining = u64::from_le_bytes(size_buf);
 
             if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent)?;
+                create_secure_dir_all(parent)?;
             }
 
-            let mut out_file = File::create(&target_path)?;
+            let mut opts = OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut out_file = opts.open(&target_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                out_file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            }
             while remaining > 0 {
                 let to_read = remaining.min(copy_buf.len() as u64) as usize;
                 read_exact_or_fmt(reader, &mut copy_buf[..to_read], "truncated WDIR file payload")?;
                 out_file.write_all(&copy_buf[..to_read])?;
                 remaining -= to_read as u64;
             }
+            out_file.sync_all()?;
         }
 
         // Strict canonical check: reject unexpected trailing garbage bytes

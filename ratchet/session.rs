@@ -91,7 +91,7 @@ fn ratchet_step(chain_key: &mut [u8; KEY_BYTES], counter: u64) -> MessageKeyMate
 }
 
 fn build_ratchet_aad(counter: u64, user_aad: &[u8]) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(12 + 8 + 8 + user_aad.len());
+    let mut aad = Vec::with_capacity(28usize.saturating_add(user_aad.len()));
     aad.extend_from_slice(b"WRAT_MSG_V1:");
     aad.extend_from_slice(&counter.to_le_bytes());
     aad.extend_from_slice(&(user_aad.len() as u64).to_le_bytes());

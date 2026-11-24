@@ -16,7 +16,7 @@ const PKE_MAGIC: [u8; 4] = *b"WPKE";
 const PKE_VERSION: u8 = 1;
 
 fn build_pke_aad(header_prefix: &[u8], user_aad: &[u8]) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(header_prefix.len() + 8 + user_aad.len());
+    let mut aad = Vec::with_capacity(header_prefix.len().saturating_add(8).saturating_add(user_aad.len()));
     aad.extend_from_slice(header_prefix);
     aad.extend_from_slice(&(user_aad.len() as u64).to_le_bytes());
     aad.extend_from_slice(user_aad);
