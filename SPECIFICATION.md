@@ -1,4 +1,4 @@
-# Wilis Cryptographic Specification (v0.4.5)
+# Wilis Cryptographic Specification (v0.4.6)
 
 This document defines the exact mathematical construction and binary container wire formats of the **Wilis** cryptographic suite.
 

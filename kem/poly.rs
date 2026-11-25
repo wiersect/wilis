@@ -53,7 +53,7 @@ impl Poly {
             let s = self.coeffs[i] as u32 + rhs.coeffs[i] as u32;
             let diff = s.wrapping_sub(q);
             // borrow = 0xFFFF_FFFF if s < q, else 0x0000_0000
-            let borrow = 0u32.wrapping_sub(diff >> 31);
+            let borrow = core::hint::black_box(0u32.wrapping_sub(diff >> 31));
             out.coeffs[i] = ((s & borrow) | (diff & !borrow)) as u16;
         }
         out
@@ -66,7 +66,7 @@ impl Poly {
         for i in 0..KEM_N {
             let d = (self.coeffs[i] as i32) - (rhs.coeffs[i] as i32);
             // Arithmetic shift: mask = 0xFFFF_FFFF if d < 0, else 0x0000_0000
-            let mask = (d >> 31) as u32;
+            let mask = core::hint::black_box((d >> 31) as u32);
             out.coeffs[i] = ((d as u32).wrapping_add(q & mask)) as u16;
         }
         out
@@ -105,7 +105,7 @@ impl Poly {
             let k = ((x as u128 * BARRETT_M) >> 64) as u64;
             let r = x - k * Q64; // Guaranteed 0 <= r < 2 * Q64
             let diff = r.wrapping_sub(Q64);
-            let borrow = 0u64.wrapping_sub(diff >> 63);
+            let borrow = core::hint::black_box(0u64.wrapping_sub(diff >> 63));
             out.coeffs[i] = ((r & borrow) | (diff & !borrow)) as u16;
         }
 
@@ -143,8 +143,8 @@ impl Poly {
         for (i, &c) in self.coeffs.iter().enumerate() {
             let cu = c as u32;
             // ge_1920 = 1 iff cu >= 1920; le_5760 = 1 iff cu <= 5760 (zero branches/division)
-            let ge_1920 = (cu.wrapping_sub(1920) >> 31) ^ 1;
-            let le_5760 = (5760u32.wrapping_sub(cu) >> 31) ^ 1;
+            let ge_1920 = core::hint::black_box((cu.wrapping_sub(1920) >> 31) ^ 1);
+            let le_5760 = core::hint::black_box((5760u32.wrapping_sub(cu) >> 31) ^ 1);
             let bit = (ge_1920 & le_5760) as u8;
             msg[i / 8] |= bit << (i % 8);
         }
@@ -195,14 +195,14 @@ impl Poly {
             let a0 = (byte & 1) + ((byte >> 1) & 1);
             let b0 = ((byte >> 2) & 1) + ((byte >> 3) & 1);
             let d0 = a0 as i32 - b0 as i32;
-            let m0 = (d0 >> 31) as u32;
+            let m0 = core::hint::black_box((d0 >> 31) as u32);
             out.coeffs[i * 2] = ((d0 as u32).wrapping_add(q & m0)) as u16;
 
             // High nibble -> coeff 2*i + 1 (branchless sign reduction mod q)
             let a1 = ((byte >> 4) & 1) + ((byte >> 5) & 1);
             let b1 = ((byte >> 6) & 1) + ((byte >> 7) & 1);
             let d1 = a1 as i32 - b1 as i32;
-            let m1 = (d1 >> 31) as u32;
+            let m1 = core::hint::black_box((d1 >> 31) as u32);
             out.coeffs[i * 2 + 1] = ((d1 as u32).wrapping_add(q & m1)) as u16;
         }
         zeroize_bytes(&mut raw);

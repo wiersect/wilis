@@ -9,29 +9,47 @@ use crate::hash::WilisHash;
 use crate::utils::constant_time::ct_eq;
 use crate::utils::zeroize::zeroize_bytes;
 
-/// RAII guard that disables terminal echo on Unix (`stty -echo`) and restores it on drop.
+/// RAII guard that disables terminal echo on Unix using absolute system `stty` paths
+/// (never searching untrusted `$PATH`) and restores echo on drop.
 #[cfg(unix)]
 struct EchoGuard {
-    active: bool,
+    stty_path: Option<&'static str>,
 }
 
 #[cfg(unix)]
 impl EchoGuard {
+    fn find_system_stty() -> Option<&'static str> {
+        ["/bin/stty", "/usr/bin/stty"]
+            .into_iter()
+            .find(|p| std::path::Path::new(p).is_file())
+    }
+
     fn disable() -> Self {
-        let ok = std::process::Command::new("stty")
-            .arg("-echo")
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        Self { active: ok }
+        if let Some(stty) = Self::find_system_stty() {
+            let ok = std::process::Command::new(stty)
+                .arg("-echo")
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                return Self {
+                    stty_path: Some(stty),
+                };
+            }
+        }
+        Self { stty_path: None }
     }
 }
 
 #[cfg(unix)]
 impl Drop for EchoGuard {
     fn drop(&mut self) {
-        if self.active {
-            let _ = std::process::Command::new("stty").arg("echo").status();
+        if let Some(stty) = self.stty_path {
+            let _ = std::process::Command::new(stty)
+                .arg("echo")
+                .stderr(std::process::Stdio::null())
+                .status();
         }
     }
 }

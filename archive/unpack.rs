@@ -248,13 +248,21 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
                 use std::os::unix::fs::PermissionsExt;
                 out_file.set_permissions(fs::Permissions::from_mode(0o600))?;
             }
-            while remaining > 0 {
-                let to_read = remaining.min(copy_buf.len() as u64) as usize;
-                read_exact_or_fmt(reader, &mut copy_buf[..to_read], "truncated WDIR file payload")?;
-                out_file.write_all(&copy_buf[..to_read])?;
-                remaining -= to_read as u64;
+            let write_res = (|| -> Result<()> {
+                while remaining > 0 {
+                    let to_read = remaining.min(copy_buf.len() as u64) as usize;
+                    read_exact_or_fmt(reader, &mut copy_buf[..to_read], "truncated WDIR file payload")?;
+                    out_file.write_all(&copy_buf[..to_read])?;
+                    remaining -= to_read as u64;
+                }
+                out_file.sync_all()?;
+                Ok(())
+            })();
+            if let Err(e) = write_res {
+                drop(out_file);
+                let _ = fs::remove_file(&target_path);
+                return Err(e);
             }
-            out_file.sync_all()?;
         }
 
         // Strict canonical check: reject unexpected trailing garbage bytes
@@ -272,6 +280,100 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
     Ok(file_count)
 }
 
+/// Performs a full read-only dry-run validation of an in-memory `WDIR` v1 archive
+/// against `dest_dir` BEFORE creating any directories or files on disk.
+///
+/// Rejects truncated headers/payloads, trailing garbage, traversal/reserved paths,
+/// case-folding/file-vs-dir collisions, and existing symlinks without touching the filesystem.
+pub fn validate_wdir_buffer(data: &[u8], dest_dir: &Path) -> Result<u64> {
+    if data.len() < 13 || data[0..4] != WDIR_MAGIC || data[4] != WDIR_VERSION {
+        return Err(WilisError::InvalidFormat(
+            "invalid or truncated WDIR archive header".into(),
+        ));
+    }
+    let file_count = u64::from_le_bytes(data[5..13].try_into().expect("8 bytes"));
+    const MAX_ARCHIVE_FILES: u64 = 1_000_000;
+    if file_count > MAX_ARCHIVE_FILES {
+        return Err(WilisError::InvalidFormat(format!(
+            "WDIR file_count {file_count} exceeds safety limit ({MAX_ARCHIVE_FILES})"
+        )));
+    }
+    if let Ok(meta) = fs::symlink_metadata(dest_dir) {
+        if meta.file_type().is_symlink() {
+            return Err(WilisError::InvalidFormat(
+                "destination directory must not be a symlink".into(),
+            ));
+        }
+        if !meta.file_type().is_dir() {
+            return Err(WilisError::InvalidFormat(
+                "destination path exists and is not a directory".into(),
+            ));
+        }
+    }
+
+    let mut pos = 13usize;
+    let mut seen_files_ci: HashSet<String> = HashSet::new();
+    let mut seen_dirs_ci: HashSet<String> = HashSet::new();
+
+    for _ in 0..file_count {
+        if data.len().saturating_sub(pos) < 4 {
+            return Err(WilisError::InvalidFormat("truncated WDIR path length".into()));
+        }
+        let path_len = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("4 bytes")) as usize;
+        pos += 4;
+        if path_len == 0 || path_len > 4096 || data.len().saturating_sub(pos) < path_len {
+            return Err(WilisError::InvalidFormat(
+                "invalid or truncated WDIR entry path".into(),
+            ));
+        }
+        let rel_path = core::str::from_utf8(&data[pos..pos + path_len])
+            .map_err(|_| WilisError::InvalidEncoding("non-UTF-8 path in WDIR archive".into()))?;
+        pos += path_len;
+
+        sanitize_archive_path(dest_dir, rel_path)?;
+        let norm_ci = Path::new(rel_path)
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(p) => p.to_str().map(|s| s.to_ascii_lowercase()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let full_ci = norm_ci.join("/");
+        if seen_dirs_ci.contains(&full_ci) || !seen_files_ci.insert(full_ci) {
+            return Err(WilisError::InvalidFormat(format!(
+                "duplicate or conflicting entry path rejected in WDIR archive: '{rel_path}'"
+            )));
+        }
+        for depth in 1..norm_ci.len() {
+            let prefix_ci = norm_ci[..depth].join("/");
+            if seen_files_ci.contains(&prefix_ci) {
+                return Err(WilisError::InvalidFormat(format!(
+                    "file-vs-directory path conflict rejected in WDIR archive: '{rel_path}'"
+                )));
+            }
+            seen_dirs_ci.insert(prefix_ci);
+        }
+        ensure_no_symlink_components(dest_dir, rel_path)?;
+
+        if data.len().saturating_sub(pos) < 8 {
+            return Err(WilisError::InvalidFormat("truncated WDIR file size".into()));
+        }
+        let file_len = u64::from_le_bytes(data[pos..pos + 8].try_into().expect("8 bytes"));
+        pos += 8;
+        if (data.len().saturating_sub(pos) as u64) < file_len {
+            return Err(WilisError::InvalidFormat("truncated WDIR file payload".into()));
+        }
+        pos += file_len as usize;
+    }
+
+    if pos != data.len() {
+        return Err(WilisError::InvalidFormat(
+            "unexpected trailing bytes after WDIR archive end".into(),
+        ));
+    }
+    Ok(file_count)
+}
+
 /// Authenticates, decrypts, and safely unpacks a `WILS` v2 directory archive using a raw key.
 pub fn decrypt_directory_with_key(
     key: &[u8; KEY_BYTES],
@@ -286,7 +388,9 @@ pub fn decrypt_directory_with_key(
         zeroize_bytes(&mut decrypted);
         return Err(e);
     }
-    let unpack_res = unpack_directory(&mut Cursor::new(&decrypted), dest_dir);
+    // Dry-run validate the entire archive before creating any files/dirs on disk
+    let unpack_res = validate_wdir_buffer(&decrypted, dest_dir)
+        .and_then(|_| unpack_directory(&mut Cursor::new(&decrypted), dest_dir));
     zeroize_bytes(&mut decrypted);
     unpack_res
 }
@@ -312,7 +416,9 @@ pub fn decrypt_directory_with_passphrase(
         zeroize_bytes(&mut decrypted);
         return Err(e);
     }
-    let unpack_res = unpack_directory(&mut Cursor::new(&decrypted), dest_dir);
+    // Dry-run validate the entire archive before creating any files/dirs on disk
+    let unpack_res = validate_wdir_buffer(&decrypted, dest_dir)
+        .and_then(|_| unpack_directory(&mut Cursor::new(&decrypted), dest_dir));
     zeroize_bytes(&mut decrypted);
     unpack_res
 }

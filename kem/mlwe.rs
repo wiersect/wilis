@@ -4,13 +4,23 @@
 use crate::core::constants::HASH_BYTES;
 use crate::error::{Result, WilisError};
 use crate::hash::hash;
-use crate::kem::poly::{vec_dot, Poly, KEM_K, POLY_BYTES};
+use crate::kem::poly::{vec_dot, Poly, KEM_K, KEM_Q, POLY_BYTES};
 use crate::utils::constant_time::ct_eq;
 use crate::utils::random::fill_random;
 use crate::utils::zeroize::{zeroize_bytes, SecretKey};
 use crate::xof::WilisXof;
 
 const PK_MAGIC: [u8; 4] = *b"WKP1";
+
+/// Returns `true` iff every coefficient of `p` lies in the valid `CBD_2` range `{-2,-1,0,1,2} mod q`.
+fn is_small_cbd2_poly(p: &Poly) -> bool {
+    let mut bad: u16 = 0;
+    for &c in &p.coeffs {
+        let ok = (c <= 2) || (c >= KEM_Q - 2 && c < KEM_Q);
+        bad |= (!ok) as u16;
+    }
+    core::hint::black_box(bad) == 0
+}
 const SK_MAGIC: [u8; 4] = *b"WKS1";
 const CT_MAGIC: [u8; 4] = *b"WKC1";
 
@@ -152,11 +162,43 @@ impl KemSecretKey {
             ));
         }
 
+        // Verify mathematical LWE consistency: s in CBD_2 AND e = t - A*s in CBD_2.
+        // Catches any bit-flip in `s`, `rho`, or `t` with probability 1 - 2^-8130.
+        let mut s_vec = [s0, s1, s2];
+        let mut lwe_ok = s_vec.iter().all(is_small_cbd2_poly);
+        if lwe_ok {
+            for row in 0..KEM_K {
+                let mut acc = Poly::zero();
+                for col in 0..KEM_K {
+                    let a_rc = Poly::sample_uniform(&pk.rho, row as u8, col as u8);
+                    let mut prod = a_rc.mul(&s_vec[col]);
+                    let next = acc.add(&prod);
+                    prod.zeroize();
+                    acc.zeroize();
+                    acc = next;
+                }
+                let mut e_rec = pk.t[row].sub(&acc);
+                acc.zeroize();
+                if !is_small_cbd2_poly(&e_rec) {
+                    lwe_ok = false;
+                }
+                e_rec.zeroize();
+            }
+        }
+        if !lwe_ok {
+            for p in &mut s_vec {
+                p.zeroize();
+            }
+            return Err(WilisError::InvalidKey(
+                "WilisKEM secret key failed Module-LWE consistency check (corrupted secret vector)".into(),
+            ));
+        }
+
         let mut z = [0u8; 32];
         z.copy_from_slice(&data[pos..pos + 32]);
 
         let sk = Self {
-            s: [s0, s1, s2],
+            s: s_vec,
             pk,
             pk_hash,
             z,

@@ -27,7 +27,7 @@ pub fn run_vault(vault_path: &str, auth: AuthInput, action: VaultAction) -> Resu
 
     match &action {
         VaultAction::Init => {
-            if path.exists() {
+            if std::fs::symlink_metadata(path).is_ok() {
                 return Err(WilisError::InvalidFormat(format!(
                     "vault '{}' already exists",
                     vault_path

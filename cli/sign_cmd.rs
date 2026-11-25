@@ -7,7 +7,8 @@ use crate::error::{Result, WilisError};
 use crate::hash::hash_hex;
 use crate::sign::{Signature, SigningKey, VerifyingKey};
 use crate::utils::zeroize::{
-    paths_refer_to_same_file, write_atomic_file, write_secret_file, zeroize_bytes,
+    paths_refer_to_same_file, read_bounded_file, write_atomic_file, write_secret_file,
+    zeroize_bytes,
 };
 
 /// Generates a post-quantum `WilisSign` Merkle keypair and writes `<prefix>.wsk` & `<prefix>.wpk`.
@@ -51,7 +52,7 @@ pub fn run_sign_file(sk_path: &str, input_path: &str, sig_out_path: &str) -> Res
         ));
     }
 
-    let mut sk_bytes = fs::read(sk_p)?;
+    let mut sk_bytes = read_bounded_file(sk_p, 256)?;
     let sk_res = SigningKey::from_bytes(&sk_bytes);
     zeroize_bytes(&mut sk_bytes);
     let mut sk = sk_res?;
@@ -81,9 +82,9 @@ pub fn run_sign_file(sk_path: &str, input_path: &str, sig_out_path: &str) -> Res
 
 /// Verifies a `WSIG` signature over a file using a `WPK1` public key.
 pub fn run_verify_file(pk_path: &str, input_path: &str, sig_path: &str) -> Result<()> {
-    let pk = VerifyingKey::from_bytes(&fs::read(pk_path)?)?;
+    let pk = VerifyingKey::from_bytes(&read_bounded_file(Path::new(pk_path), 256)?)?;
     let message = fs::read(input_path)?;
-    let sig = Signature::from_bytes(&fs::read(sig_path)?)?;
+    let sig = Signature::from_bytes(&read_bounded_file(Path::new(sig_path), 4096)?)?;
 
     if pk.verify(&message, &sig) {
         println!(

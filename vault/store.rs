@@ -1,7 +1,6 @@
 //! Encrypted key-value secret store (`WVLT` v1) with atomic save and memory wiping.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 
 use crate::core::constants::HASH_BYTES;
@@ -10,13 +9,14 @@ use crate::format::{
     decrypt_with_passphrase_and_keyfile, encrypt_with_passphrase_and_keyfile,
 };
 use crate::kdf::KdfParams;
-use crate::utils::zeroize::{write_secret_file, zeroize_bytes};
+use crate::utils::zeroize::{read_bounded_file, write_secret_file, zeroize_bytes};
 
 const VAULT_MAGIC: [u8; 4] = *b"WVLT";
 const VAULT_VERSION: u8 = 1;
 const VAULT_AAD: &[u8] = b"wilis-vault-v1";
 const MAX_VAULT_KEY_BYTES: usize = 4096;
 const MAX_VAULT_VAL_BYTES: usize = 64 * 1024 * 1024;
+const MAX_VAULT_FILE_BYTES: usize = 128 * 1024 * 1024;
 
 fn validate_secret_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > MAX_VAULT_KEY_BYTES {
@@ -202,7 +202,7 @@ impl Vault {
         passphrase: &[u8],
         keyfile_hash: Option<&[u8; HASH_BYTES]>,
     ) -> Result<Self> {
-        let encrypted = fs::read(path)?;
+        let encrypted = read_bounded_file(path, MAX_VAULT_FILE_BYTES)?;
         let mut raw = decrypt_with_passphrase_and_keyfile(
             passphrase,
             keyfile_hash,

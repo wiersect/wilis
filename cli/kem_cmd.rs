@@ -6,9 +6,12 @@ use std::path::Path;
 
 use crate::error::{Result, WilisError};
 use crate::hash::hash_hex;
-use crate::kem::{keygen, pub_decrypt, pub_encrypt, KemPublicKey, KemSecretKey};
+use crate::kem::{
+    keygen, pub_decrypt, pub_encrypt, KemPublicKey, KemSecretKey, KEM_PK_BYTES, KEM_SK_BYTES,
+};
 use crate::utils::zeroize::{
-    paths_refer_to_same_file, write_atomic_file, write_secret_file, zeroize_bytes,
+    paths_refer_to_same_file, read_bounded_file, write_atomic_file, write_secret_file,
+    zeroize_bytes,
 };
 
 fn validate_key_prefix(out_prefix: &str) -> Result<()> {
@@ -56,7 +59,7 @@ pub fn run_pub_encrypt(pk_path: &str, aad: &str, input_path: &str, output_path: 
         ));
     }
 
-    let pk = KemPublicKey::from_bytes(&fs::read(pk_path)?)?;
+    let pk = KemPublicKey::from_bytes(&read_bounded_file(pk_p, KEM_PK_BYTES)?)?;
     let mut plaintext = fs::read(in_p)?;
     let in_len = plaintext.len();
     let packet_res = pub_encrypt(&pk, &plaintext, aad.as_bytes());
@@ -86,7 +89,7 @@ pub fn run_pub_decrypt(sk_path: &str, aad: &str, input_path: &str, output_path: 
         ));
     }
 
-    let mut sk_bytes = fs::read(sk_path)?;
+    let mut sk_bytes = read_bounded_file(sk_p, KEM_SK_BYTES)?;
     let sk_res = KemSecretKey::from_bytes(&sk_bytes);
     zeroize_bytes(&mut sk_bytes);
     let sk = sk_res?;

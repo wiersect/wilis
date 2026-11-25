@@ -17,9 +17,9 @@ pub fn gf_add(a: u8, b: u8) -> u8 {
 pub fn gf_mul(mut a: u8, mut b: u8) -> u8 {
     let mut prod: u8 = 0;
     for _ in 0..8 {
-        let mask = 0u8.wrapping_sub(b & 1);
+        let mask = core::hint::black_box(0u8.wrapping_sub(b & 1));
         prod ^= a & mask;
-        let high_bit = 0u8.wrapping_sub((a >> 7) & 1);
+        let high_bit = core::hint::black_box(0u8.wrapping_sub((a >> 7) & 1));
         a = (a << 1) ^ (GF_POLY & high_bit);
         b >>= 1;
     }

@@ -413,3 +413,92 @@ fn regression_v045_audit_fixes_verified() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn regression_v046_audit_fixes_verified() {
+    use wilis::archive::unpack::validate_wdir_buffer;
+    use wilis::ffi::c_api::{
+        wilis_kdf_derive, wilis_kem_decapsulate, wilis_kem_encapsulate, WILIS_ERR_INVALID_ARG,
+    };
+    use wilis::kem::{keygen, KemSecretKey, KEM_CT_BYTES, KEM_PK_BYTES, KEM_SK_BYTES, KEM_SS_BYTES};
+    use wilis::utils::zeroize::read_bounded_file;
+
+    // 1. KemSecretKey::from_bytes detects 1-bit flip inside secret vector `s` via e = t - A*s in CBD_2!
+    let (sk, _) = keygen().unwrap();
+    let mut sk_raw = sk.to_bytes();
+    sk_raw[10] ^= 0x01; // Flip 1 bit inside packed `s[0]` (leaving pk & pk_hash untouched!)
+    assert!(
+        KemSecretKey::from_bytes(&sk_raw).is_err(),
+        "corrupted secret vector `s` must fail Module-LWE consistency check"
+    );
+
+    // 2. read_bounded_file rejects oversized files without reading past max_bytes + 1
+    let base = std::env::temp_dir().join(format!("wilis_v046_reg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let big = base.join("oversized.key");
+    std::fs::write(&big, vec![0xAAu8; 4096]).unwrap();
+    assert!(read_bounded_file(&big, 1284).is_err());
+    assert_eq!(read_bounded_file(&big, 4096).unwrap().len(), 4096);
+
+    // 3. validate_wdir_buffer rejects trailing/corrupted WDIR WITHOUT creating dest_dir on disk
+    let untouched_dest = base.join("never_created_dir");
+    let mut bad_wdir = Vec::new();
+    bad_wdir.extend_from_slice(b"WDIR\x01");
+    bad_wdir.extend_from_slice(&1u64.to_le_bytes());
+    bad_wdir.extend_from_slice(&5u32.to_le_bytes());
+    bad_wdir.extend_from_slice(b"a.txt");
+    bad_wdir.extend_from_slice(&1u64.to_le_bytes());
+    bad_wdir.push(b'x');
+    bad_wdir.push(0x99); // unexpected trailing byte
+    assert!(validate_wdir_buffer(&bad_wdir, &untouched_dest).is_err());
+    assert!(
+        !untouched_dest.exists(),
+        "dry-run WDIR validation must not create directories on failure"
+    );
+
+    // 4. pack_directory rejects case-folding duplicates on case-sensitive filesystems (Linux)
+    #[cfg(target_os = "linux")]
+    {
+        use wilis::archive::pack::pack_directory;
+        let dup_src = base.join("case_src");
+        std::fs::create_dir_all(&dup_src).unwrap();
+        std::fs::write(dup_src.join("Note.txt"), b"one").unwrap();
+        std::fs::write(dup_src.join("note.txt"), b"two").unwrap();
+        let mut sink = Vec::new();
+        assert!(
+            pack_directory(&dup_src, &mut sink).is_err(),
+            "pack_directory must reject case-insensitive duplicates at pack time"
+        );
+    }
+
+    // 5. C-FFI defensive output zeroization on invalid arguments
+    unsafe {
+        let salt = [0x11u8; 24];
+        let mut key_out = [0xEEu8; 32];
+        assert_eq!(
+            wilis_kdf_derive(b"pw".as_ptr(), 2, salt.as_ptr(), 1, 1, key_out.as_mut_ptr()),
+            WILIS_ERR_INVALID_ARG
+        );
+        assert!(key_out.iter().all(|&b| b == 0));
+
+        let bad_pk = vec![0xFFu8; KEM_PK_BYTES];
+        let mut ct_out = vec![0xDDu8; KEM_CT_BYTES];
+        let mut ss_out = [0xCCu8; KEM_SS_BYTES];
+        assert_eq!(
+            wilis_kem_encapsulate(bad_pk.as_ptr(), ct_out.as_mut_ptr(), ss_out.as_mut_ptr()),
+            WILIS_ERR_INVALID_ARG
+        );
+        assert!(ct_out.iter().all(|&b| b == 0) && ss_out.iter().all(|&b| b == 0));
+
+        let bad_sk = vec![0xFFu8; KEM_SK_BYTES];
+        let mut ss_out2 = [0xBBu8; KEM_SS_BYTES];
+        assert_eq!(
+            wilis_kem_decapsulate(bad_sk.as_ptr(), ct_out.as_ptr(), ss_out2.as_mut_ptr()),
+            WILIS_ERR_INVALID_ARG
+        );
+        assert!(ss_out2.iter().all(|&b| b == 0));
+    }
+
+    let _ = std::fs::remove_dir_all(&base);
+}

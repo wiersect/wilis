@@ -2,6 +2,16 @@
 
 All notable changes to **Wilis** are documented in this file.
 
+## [0.4.6] - 2026-11-25
+
+### Bug Fixes & Deep Red-Team Security Audit (Round 6)
+- **Full Mathematical LWE Secret-Key Verification (`kem/mlwe.rs`)**: Added Module-LWE consistency verification in `KemSecretKey::from_bytes` checking both `s` and recovered noise `e = t - A*s` strictly lie in `CBD_2` range (`{-2..=2} mod 7681`), catching any single-bit corruption in `s`, `rho`, or `t` with probability `1 - 2^-8130` while remaining 100% compatible with existing `WKS1` keys.
+- **Pack-Time Consistency, Anti-TOCTOU & All-or-Nothing Dry-Run Validation in `WilisDir` (`archive/pack.rs`, `archive/unpack.rs`, `cli/dir_cmd.rs`)**: Rejected non-UTF-8 filenames (replacing lossy substitution), rejected case-folding duplicates & unsafe paths at pack time so `encrypt-dir` can never emit an un-extractable backup, added Unix `(dev, ino)` anti-TOCTOU symlink verification + concurrent file-growth detection, added full read-only `validate_wdir_buffer` dry-run before touching disk during `decrypt_directory_*`, cleaned up partial files on mid-stream error, and rejected non-directory `--out` paths before running KDF.
+- **OOM-Safe Bounded Key/Signature/Vault Reading (`utils/zeroize.rs`, `cli/kem_cmd.rs`, `cli/sign_cmd.rs`, `vault/store.rs`, `cli/vault_cmd.rs`)**: Added `read_bounded_file(path, max_bytes)` so passing `/dev/zero` or multi-GB accidental files to `--pk`, `--sk`, `--sig`, or vault loads fails immediately without OOM; caught dangling symlinks in `vault init`.
+- **Defensive C-FFI Error Output Zeroization (`ffi/c_api.rs`)**: Zeroized `key_32_out` / `pk_out` / `sk_out` / `ct_out` / `ss_32_out` on error paths in `wilis_kdf_derive`, `wilis_kem_keygen`, `wilis_kem_encapsulate`, and `wilis_kem_decapsulate`.
+- **Eliminated `$PATH` Hijacking in Hidden Passphrase Prompt (`utils/prompt.rs`)**: Resolved `stty` exclusively from absolute system paths (`/bin/stty`, `/usr/bin/stty`) and silenced non-TTY stderr noise.
+- **Constant-Time Compiler Barriers & Regression Suite (`kem/poly.rs`, `split/gf256.rs`, `tests/known_answer_vectors.rs`)**: Wrapped branchless constant-time masks in `core::hint::black_box` and added `regression_v046_audit_fixes_verified` (**41 / 41 tests**).
+
 ## [0.4.5] - 2026-11-24
 
 ### Bug Fixes & Deep Protocol / Filesystem / CLI Hardening (Round 5)

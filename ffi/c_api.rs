@@ -1,4 +1,4 @@
-//! C-ABI exported cryptographic functions for `libwilis` v0.4.5.
+//! C-ABI exported cryptographic functions for `libwilis` v0.4.6.
 //!
 //! Safety & hardening guarantees:
 //! - Every `extern "C"` boundary catches Rust panics via `std::panic::catch_unwind`
@@ -328,7 +328,10 @@ pub unsafe extern "C" fn wilis_kdf_derive(
                 slice::from_raw_parts_mut(key_32_out, KEY_BYTES).copy_from_slice(key.as_bytes());
                 WILIS_OK
             }
-            Err(_) => WILIS_ERR_INVALID_ARG,
+            Err(_) => {
+                zeroize_bytes(slice::from_raw_parts_mut(key_32_out, KEY_BYTES));
+                WILIS_ERR_INVALID_ARG
+            }
         }
     })
 }
@@ -355,7 +358,11 @@ pub unsafe extern "C" fn wilis_kem_keygen(pk_out: *mut u8, sk_out: *mut u8) -> i
                 zeroize_bytes(&mut sk_bytes);
                 WILIS_OK
             }
-            Err(_) => WILIS_ERR_INTERNAL,
+            Err(_) => {
+                zeroize_bytes(slice::from_raw_parts_mut(pk_out, KEM_PK_BYTES));
+                zeroize_bytes(slice::from_raw_parts_mut(sk_out, KEM_SK_BYTES));
+                WILIS_ERR_INTERNAL
+            }
         }
     })
 }
@@ -381,7 +388,11 @@ pub unsafe extern "C" fn wilis_kem_encapsulate(
         }
         let pk_obj = match KemPublicKey::from_bytes(slice::from_raw_parts(pk, KEM_PK_BYTES)) {
             Ok(k) => k,
-            Err(_) => return WILIS_ERR_INVALID_ARG,
+            Err(_) => {
+                zeroize_bytes(slice::from_raw_parts_mut(ct_out, KEM_CT_BYTES));
+                zeroize_bytes(slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES));
+                return WILIS_ERR_INVALID_ARG;
+            }
         };
         match encapsulate(&pk_obj) {
             Ok((ct, ss)) => {
@@ -389,7 +400,11 @@ pub unsafe extern "C" fn wilis_kem_encapsulate(
                 slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES).copy_from_slice(ss.as_bytes());
                 WILIS_OK
             }
-            Err(_) => WILIS_ERR_INTERNAL,
+            Err(_) => {
+                zeroize_bytes(slice::from_raw_parts_mut(ct_out, KEM_CT_BYTES));
+                zeroize_bytes(slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES));
+                WILIS_ERR_INTERNAL
+            }
         }
     })
 }
@@ -408,18 +423,24 @@ pub unsafe extern "C" fn wilis_kem_decapsulate(
         if sk.is_null() || ct.is_null() || ss_32_out.is_null() {
             return WILIS_ERR_INVALID_ARG;
         }
-        let ss = {
+        let ss_res = {
             let sk_obj = match KemSecretKey::from_bytes(slice::from_raw_parts(sk, KEM_SK_BYTES)) {
                 Ok(k) => k,
-                Err(_) => return WILIS_ERR_INVALID_ARG,
+                Err(_) => return {
+                    zeroize_bytes(slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES));
+                    WILIS_ERR_INVALID_ARG
+                },
             };
             let ct_obj = match KemCiphertext::from_bytes(slice::from_raw_parts(ct, KEM_CT_BYTES)) {
                 Ok(c) => c,
-                Err(_) => return WILIS_ERR_INVALID_ARG,
+                Err(_) => return {
+                    zeroize_bytes(slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES));
+                    WILIS_ERR_INVALID_ARG
+                },
             };
             decapsulate(&sk_obj, &ct_obj)
         };
-        slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES).copy_from_slice(ss.as_bytes());
+        slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES).copy_from_slice(ss_res.as_bytes());
         WILIS_OK
     })
 }

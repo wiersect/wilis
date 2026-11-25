@@ -1,9 +1,11 @@
 //! Recursive directory packing (`WDIR` v1) and encrypted folder sealing.
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::archive::unpack::sanitize_archive_path;
 use crate::core::constants::{HASH_BYTES, KEY_BYTES};
 use crate::error::{Result, WilisError};
 use crate::kdf::KdfParams;
@@ -33,6 +35,18 @@ pub fn pack_directory<W: Write>(root_dir: &Path, writer: &mut W) -> Result<u64> 
     // Deterministic lexicographical ordering
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
+    // Validate all paths & reject case-folding collisions at pack time so we never
+    // produce an archive that decrypt-dir would later refuse to extract.
+    let mut seen_ci: HashSet<String> = HashSet::with_capacity(entries.len());
+    for (rel_path, _) in &entries {
+        sanitize_archive_path(Path::new("."), rel_path)?;
+        if !seen_ci.insert(rel_path.to_ascii_lowercase()) {
+            return Err(WilisError::InvalidFormat(format!(
+                "case-insensitive path collision in source directory: '{rel_path}'"
+            )));
+        }
+    }
+
     writer.write_all(&WDIR_MAGIC)?;
     writer.write_all(&[WDIR_VERSION])?;
     writer.write_all(&(entries.len() as u64).to_le_bytes())?;
@@ -44,14 +58,31 @@ pub fn pack_directory<W: Write>(root_dir: &Path, writer: &mut W) -> Result<u64> 
             if path_bytes.len() > u32::MAX as usize {
                 return Err(WilisError::InvalidFormat("file path too long".into()));
             }
-            let meta = fs::metadata(full_path)?;
-            let file_len = meta.len();
+            let sym_meta = fs::symlink_metadata(full_path)?;
+            if sym_meta.file_type().is_symlink() || !sym_meta.file_type().is_file() {
+                return Err(WilisError::InvalidFormat(format!(
+                    "file '{}' became a symlink or non-regular file during archiving",
+                    full_path.display()
+                )));
+            }
+            let mut f = File::open(full_path)?;
+            let f_meta = f.metadata()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if sym_meta.dev() != f_meta.dev() || sym_meta.ino() != f_meta.ino() {
+                    return Err(WilisError::InvalidFormat(format!(
+                        "file '{}' was replaced during archiving (TOCTOU detected)",
+                        full_path.display()
+                    )));
+                }
+            }
+            let file_len = f_meta.len();
 
             writer.write_all(&(path_bytes.len() as u32).to_le_bytes())?;
             writer.write_all(path_bytes)?;
             writer.write_all(&file_len.to_le_bytes())?;
 
-            let mut f = File::open(full_path)?;
             let mut remaining = file_len;
             while remaining > 0 {
                 let to_read = remaining.min(copy_buf.len() as u64) as usize;
@@ -62,12 +93,28 @@ pub fn pack_directory<W: Write>(root_dir: &Path, writer: &mut W) -> Result<u64> 
                 };
                 if n == 0 {
                     return Err(WilisError::InvalidFormat(format!(
-                        "file '{}' changed size during archiving",
+                        "file '{}' shrank during archiving",
                         full_path.display()
                     )));
                 }
                 writer.write_all(&copy_buf[..n])?;
                 remaining -= n as u64;
+            }
+
+            // Detect concurrent file growth after reading `file_len` bytes
+            let mut extra = [0u8; 1];
+            loop {
+                match f.read(&mut extra) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        return Err(WilisError::InvalidFormat(format!(
+                            "file '{}' grew during archiving",
+                            full_path.display()
+                        )));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e.into()),
+                }
             }
         }
         writer.flush()?;
@@ -97,13 +144,18 @@ fn collect_files(
             let rel = path.strip_prefix(root).map_err(|_| {
                 WilisError::InvalidFormat("failed to compute relative path".into())
             })?;
-            // Normalize path separators to forward slashes for cross-platform archives
-            let normalized = rel
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join("/");
-            out.push((normalized, path));
+            // Reject non-UTF-8 filenames strictly rather than silently corrupting via lossy replacement
+            let mut parts = Vec::new();
+            for comp in rel.components() {
+                let s = comp.as_os_str().to_str().ok_or_else(|| {
+                    WilisError::InvalidEncoding(format!(
+                        "non-UTF-8 filename cannot be archived safely: '{}'",
+                        path.display()
+                    ))
+                })?;
+                parts.push(s);
+            }
+            out.push((parts.join("/"), path));
         }
     }
     Ok(())

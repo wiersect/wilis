@@ -3,7 +3,7 @@
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{compiler_fence, Ordering};
@@ -160,6 +160,27 @@ pub fn write_atomic_file(target: &Path, data: &[u8], owner_only: bool) -> Result
 /// permissions (`0600` on Unix), `O_EXCL` temp creation, and `sync_all()` durability.
 pub fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
     write_atomic_file(path, data, true)
+}
+
+/// Reads at most `max_bytes` from `path` using a bounded reader, preventing OOM DoS
+/// if a user or attacker supplies `/dev/zero` or a multi-gigabyte file for a small key/signature.
+pub fn read_bounded_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
+    let file = File::open(path)?;
+    let limit = (max_bytes as u64).saturating_add(1);
+    let mut buf = Vec::new();
+    if let Err(e) = file.take(limit).read_to_end(&mut buf) {
+        zeroize_bytes(&mut buf);
+        return Err(e.into());
+    }
+    if buf.len() > max_bytes {
+        zeroize_bytes(&mut buf);
+        return Err(WilisError::InvalidFormat(format!(
+            "file '{}' exceeds maximum allowed size of {} bytes",
+            path.display(),
+            max_bytes
+        )));
+    }
+    Ok(buf)
 }
 
 /// Returns `true` if two filesystem paths refer to the exact same underlying file

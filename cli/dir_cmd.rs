@@ -1,5 +1,6 @@
 //! CLI handlers for `WilisDir` full-directory encryption (`encrypt-dir` & `decrypt-dir`).
 
+use std::fs;
 use std::path::Path;
 
 use crate::archive::{
@@ -7,7 +8,8 @@ use crate::archive::{
     encrypt_directory_with_passphrase,
 };
 use crate::cli::args::AuthInput;
-use crate::error::Result;
+use crate::error::{Result, WilisError};
+use crate::utils::zeroize::paths_refer_to_same_file;
 
 /// Packs and encrypts an entire folder recursively into a single `WILS` v2 `.wils` file.
 pub fn run_encrypt_dir(
@@ -53,6 +55,18 @@ pub fn run_decrypt_dir(
 ) -> Result<()> {
     let src = Path::new(input_file);
     let dst = Path::new(out_dir);
+    if paths_refer_to_same_file(src, dst) {
+        return Err(WilisError::InvalidParameters(
+            "destination directory must not refer to the input archive".into(),
+        ));
+    }
+    if let Ok(meta) = fs::symlink_metadata(dst) {
+        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+            return Err(WilisError::InvalidFormat(
+                "destination path exists and is a symlink or non-directory".into(),
+            ));
+        }
+    }
 
     let files = match &auth {
         AuthInput::Passphrase {

@@ -1,4 +1,4 @@
-//! Command-line argument parser and help text definitions for Wilis v0.4.5.
+//! Command-line argument parser and help text definitions for Wilis v0.4.6.
 
 use std::path::Path;
 
