@@ -56,57 +56,49 @@ fn trimmed_welch_t(mut a: Vec<f64>, mut b: Vec<f64>) -> f64 {
     }
 }
 
+#[inline(never)]
+fn time_ct_eq_batch(a: &[u8; 32], b: &[u8; 32], iters: usize) -> f64 {
+    let t0 = Instant::now();
+    let mut acc = false;
+    for _ in 0..iters {
+        acc ^= ct_eq(black_box(a), black_box(b));
+    }
+    black_box(acc);
+    t0.elapsed().as_nanos() as f64
+}
+
 fn measure_ct_eq_welch_t() -> f64 {
     let base = [0xA5u8; 32];
-    let same = [0xA5u8; 32];
-    let mut diff_first = [0xA5u8; 32];
-    diff_first[0] ^= 0xFF;
-
-    // Warmup caches & branch predictors
-    for _ in 0..64 {
-        let _ = black_box(ct_eq(black_box(&base), black_box(&same)));
-        let _ = black_box(ct_eq(black_box(&base), black_box(&diff_first)));
-    }
+    // Use a SINGLE stack buffer address mutated in-place and a SINGLE #[inline(never)]
+    // timing function so both classes share identical cache-line alignment and code address.
+    let mut probe = [0xA5u8; 32];
 
     const SAMPLES: usize = 300;
-    const INNER_ITERS: usize = 256;
+    const INNER_ITERS: usize = 512;
+
+    // Warmup caches & CPU frequency governor
+    for _ in 0..32 {
+        probe[0] = 0xA5;
+        let _ = time_ct_eq_batch(&base, &probe, 64);
+        probe[0] = 0x5A;
+        let _ = time_ct_eq_batch(&base, &probe, 64);
+    }
+
     let mut class_a = Vec::with_capacity(SAMPLES);
     let mut class_b = Vec::with_capacity(SAMPLES);
 
     for i in 0..SAMPLES {
         // Interleave class order to cancel monotonic thermal/frequency drift
         if (i & 1) == 0 {
-            let t0 = Instant::now();
-            let mut acc = false;
-            for _ in 0..INNER_ITERS {
-                acc ^= ct_eq(black_box(&base), black_box(&same));
-            }
-            black_box(acc);
-            class_a.push(t0.elapsed().as_nanos() as f64);
-
-            let t1 = Instant::now();
-            let mut acc2 = false;
-            for _ in 0..INNER_ITERS {
-                acc2 ^= ct_eq(black_box(&base), black_box(&diff_first));
-            }
-            black_box(acc2);
-            class_b.push(t1.elapsed().as_nanos() as f64);
+            probe[0] = 0xA5;
+            class_a.push(time_ct_eq_batch(&base, &probe, INNER_ITERS));
+            probe[0] = 0x5A;
+            class_b.push(time_ct_eq_batch(&base, &probe, INNER_ITERS));
         } else {
-            let t1 = Instant::now();
-            let mut acc2 = false;
-            for _ in 0..INNER_ITERS {
-                acc2 ^= ct_eq(black_box(&base), black_box(&diff_first));
-            }
-            black_box(acc2);
-            class_b.push(t1.elapsed().as_nanos() as f64);
-
-            let t0 = Instant::now();
-            let mut acc = false;
-            for _ in 0..INNER_ITERS {
-                acc ^= ct_eq(black_box(&base), black_box(&same));
-            }
-            black_box(acc);
-            class_a.push(t0.elapsed().as_nanos() as f64);
+            probe[0] = 0x5A;
+            class_b.push(time_ct_eq_batch(&base, &probe, INNER_ITERS));
+            probe[0] = 0xA5;
+            class_a.push(time_ct_eq_batch(&base, &probe, INNER_ITERS));
         }
     }
 

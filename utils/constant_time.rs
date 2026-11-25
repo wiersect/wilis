@@ -13,7 +13,7 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 
     let mut diff: u8 = 0;
     for (&x, &y) in a.iter().zip(b.iter()) {
-        diff |= black_box(x ^ y);
+        diff = black_box(diff | black_box(x ^ y));
     }
 
     black_box(diff) == 0

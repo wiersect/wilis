@@ -47,10 +47,10 @@ pub fn permute_4x(states: &mut [State; 4], rounds: usize) {
     #[cfg(target_arch = "aarch64")]
     {
         // SAFETY: NEON is mandatory on all AArch64 targets.
+        let [s0, s1, s2, s3] = states;
         unsafe {
-            let (left, right) = states.split_at_mut(2);
-            permute_2x_neon(&mut left[0], &mut left[1], rounds);
-            permute_2x_neon(&mut right[0], &mut right[1], rounds);
+            permute_2x_neon(s0, s1, rounds);
+            permute_2x_neon(s2, s3, rounds);
         }
         return;
     }
