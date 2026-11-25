@@ -2,6 +2,19 @@
 
 All notable changes to **Wilis** are documented in this file.
 
+## [0.5.0] - 2026-11-25
+
+### Major Feature Release — Multi-Recipient Streaming PQ Encryption, PQ-PCS Ratchet, Length-Hiding Padding, Streaming Sign, ASCII Armor & Expanded FFI
+100% wire-compatible with all `v0.4.x` containers, keys, signatures, and locked Known-Answer Test Vectors, while preserving **zero external Rust dependencies**.
+
+- **Multi-Recipient Streaming Post-Quantum Encryption (`WPKE` v2 — `kem/multi.rs`, `cli/kem_cmd.rs`)**: Encrypts arbitrarily large multi-GB files in constant memory (`O(chunk_size)` RAM) for **1 to 64 post-quantum recipients** simultaneously (`--pk alice.wkp --pk bob.wkp ...`). Uses anonymous recipient slots (no plaintext key fingerprints), constant-slot decapsulation (no slot-index timing leak), full header-digest AAD binding across every chunk, and automatic backward-compatible `WPKE` v1/v2 detection in `pub-decrypt`.
+- **Post-Quantum Authenticated Handshake & Post-Compromise-Secure Ratchet (`ratchet/pq_session.rs`)**: Added `PqRatchetSession` with mutually authenticated `WilisKEM` + `WilisSign` handshakes (`WHSH` v1), epoch-bound messages (`WRP2` v1), and transactional MAC-authenticated post-quantum KEM rekey packets (`WPRK` v1) delivering full **Post-Compromise Security (break-in recovery)** even after full prior session state compromise.
+- **Canonical Length-Hiding Padding (`WilisPad` — `utils/padding.rs`, CLI `--pad` / `--unpad`)**: Mitigates traffic-analysis and plaintext-length side channels by framing plaintexts to exact multiples of `16..=65536` bytes with constant-time sentinel & zero-byte verification.
+- **PEM-Style ASCII Armor (`WilisArmor` — `utils/armor.rs`, CLI `--armor`)**: Added 64-char wrapped canonical Base64 armor blocks (`WILIS MESSAGE`, `WILIS ENCRYPTED`, `WILIS SIGNATURE`, `WILIS PUBLIC KEY`) protected by a constant-time verified 24-bit `WilisHash-256` integrity checksum, with seamless auto-detection on `decrypt-text`, `pub-decrypt`, and `verify`.
+- **Constant-Memory Multi-GB Streaming Digital Signatures (`WSIG` v2 — `sign/keypair.rs`, `cli/sign_cmd.rs`)**: Added `SigningKey::sign_stream` and `VerifyingKey::verify_stream` streaming files in 64 KiB constant RAM with strict domain separation (`WSIG_MG2` vs `WSIG_MG1`), while keeping full backward compatibility with `WSIG` v1 signatures.
+- **Expanded C99 ABI & Python 3 Binding (`ffi/c_api.rs`, `include/wilis.h`, `bindings/python/wilis_py.py`)**: Exported `wilis_version`, `wilis_subkey_derive`, `wilis_sign_keygen`, `wilis_sign_message` (atomic stateful `sk_inout` update), and `wilis_verify_message` with `ffi_guard`, overlap checks, and secret zeroization.
+- **7-Part Scientific Cryptanalysis Audit & Expanded Fuzz/Integration Suite (`audit/`, `tests/v050_features.rs`, `tests/bug_audit_fuzz.rs`)**: Upgraded `wilis audit` to 7 parts (verifying `WPKE` v2 multi-recipient isolation, PQ-PCS ratchet healing, and `WilisPad` tamper rejection), expanded parser fuzzing to all 22 binary/text parsers, and reached **48 / 48 passing tests** under `RUSTFLAGS="-D warnings"`.
+
 ## [0.4.7] - 2026-11-25
 
 ### Bug Fixes & Deep Security Audit (Round 7)

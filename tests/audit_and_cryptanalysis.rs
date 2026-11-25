@@ -1,4 +1,4 @@
-//! Scientific 6-part cryptanalysis audit & key-commitment security tests for `Wilis`.
+//! Scientific 7-part cryptanalysis audit & key-commitment security tests for `Wilis`.
 
 use wilis::aead::{open, seal};
 use wilis::audit::run_full_audit;
@@ -29,6 +29,11 @@ fn full_cryptanalysis_audit_passes_all_6_checks() {
         summary.kem_cca2.passed,
         "Post-quantum KEM CCA2 check failed: {:?}",
         summary.kem_cca2
+    );
+    assert!(
+        summary.pq_protocols.passed,
+        "v0.5.0 PQ protocol audit failed: {:?}",
+        summary.pq_protocols
     );
     assert!(summary.overall_pass, "Overall cryptographic audit failed");
 }

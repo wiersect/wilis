@@ -2,7 +2,8 @@
 
 use crate::audit::avalanche::{analyze_avalanche_by_round, analyze_bic, BicResult, RoundAvalanche};
 use crate::audit::key_sensitivity::{
-    analyze_kem_cca2, analyze_related_key_sensitivity, KemAuditResult, KeySensitivityResult,
+    analyze_kem_cca2, analyze_pq_protocols, analyze_related_key_sensitivity, KemAuditResult,
+    KeySensitivityResult, PqProtocolAuditResult,
 };
 use crate::audit::randomness::{analyze_keystream_randomness, RandomnessMetrics};
 use crate::audit::sbox_analysis::{analyze_chi5_sbox, SboxMetrics};
@@ -17,10 +18,11 @@ pub struct AuditSummary {
     pub randomness: RandomnessMetrics,
     pub key_sensitivity: KeySensitivityResult,
     pub kem_cca2: KemAuditResult,
+    pub pq_protocols: PqProtocolAuditResult,
     pub overall_pass: bool,
 }
 
-/// Runs the complete 6-part cryptanalysis and statistical audit battery.
+/// Runs the complete 7-part cryptanalysis and statistical audit battery.
 pub fn run_full_audit() -> AuditSummary {
     let round_avalanche = analyze_avalanche_by_round();
     let first_full_diffusion_round = round_avalanche
@@ -32,6 +34,7 @@ pub fn run_full_audit() -> AuditSummary {
     let randomness = analyze_keystream_randomness(131_072);
     let key_sensitivity = analyze_related_key_sensitivity();
     let kem_cca2 = analyze_kem_cca2(8);
+    let pq_protocols = analyze_pq_protocols();
 
     let full_round_ok = round_avalanche
         .last()
@@ -42,7 +45,8 @@ pub fn run_full_audit() -> AuditSummary {
         && sbox.passed
         && randomness.all_passed
         && key_sensitivity.passed
-        && kem_cca2.passed;
+        && kem_cca2.passed
+        && pq_protocols.passed;
 
     AuditSummary {
         round_avalanche,
@@ -52,6 +56,7 @@ pub fn run_full_audit() -> AuditSummary {
         randomness,
         key_sensitivity,
         kem_cca2,
+        pq_protocols,
         overall_pass,
     }
 }
@@ -64,7 +69,7 @@ pub fn format_audit_report(summary: &AuditSummary) -> String {
         env!("CARGO_PKG_VERSION")
     ));
 
-    out.push_str("[1/6] Round-by-Round Strict Avalanche Criterion (384-bit state)\n");
+    out.push_str("[1/7] Round-by-Round Strict Avalanche Criterion (384-bit state)\n");
     for r in &summary.round_avalanche {
         if r.rounds <= 4 || r.rounds == 8 || r.rounds == 12 || r.rounds == 16 {
             out.push_str(&format!(
@@ -86,7 +91,7 @@ pub fn format_audit_report(summary: &AuditSummary) -> String {
         ));
     }
 
-    out.push_str("[2/6] Bit Independence Criterion (BIC, 512 trials x 2016 bit pairs)\n");
+    out.push_str("[2/7] Bit Independence Criterion (BIC, 512 trials x 2016 bit pairs)\n");
     out.push_str(&format!(
         "  Max |corr| : {:.4} | Avg |corr| : {:.4} -> {}\n\n",
         summary.bic.max_abs_correlation,
@@ -94,7 +99,7 @@ pub fn format_audit_report(summary: &AuditSummary) -> String {
         if summary.bic.passed { "PASS" } else { "FAIL" }
     ));
 
-    out.push_str("[3/6] Bitsliced Chi-5 S-Box Cryptanalysis (Exact DDT & LAT)\n");
+    out.push_str("[3/7] Bitsliced Chi-5 S-Box Cryptanalysis (Exact DDT & LAT)\n");
     out.push_str(&format!(
         "  Bijective  : {} | Diff Uniformity : {} | Max Linear Bias : {} | Nonlinearity : {} -> {}\n",
         summary.sbox.is_bijective,
@@ -107,7 +112,7 @@ pub fn format_audit_report(summary: &AuditSummary) -> String {
 
     let rnd = &summary.randomness;
     out.push_str(&format!(
-        "[4/6] Keystream Statistical Randomness Battery ({} bytes)\n",
+        "[4/7] Keystream Statistical Randomness Battery ({} bytes)\n",
         rnd.sample_bytes
     ));
     out.push_str(&format!(
@@ -136,7 +141,7 @@ pub fn format_audit_report(summary: &AuditSummary) -> String {
         if rnd.autocorr_pass { "PASS" } else { "FAIL" }
     ));
 
-    out.push_str("[5/6] Related-Key Sensitivity (256 1-bit key flips on WilisAEAD)\n");
+    out.push_str("[5/7] Related-Key Sensitivity (256 1-bit key flips on WilisAEAD)\n");
     out.push_str(&format!(
         "  Ciphertext Flip    : {:.2}% | Tag Flip : {:.2}% -> {}\n\n",
         summary.key_sensitivity.avg_ct_percent,
@@ -145,7 +150,7 @@ pub fn format_audit_report(summary: &AuditSummary) -> String {
     ));
 
     out.push_str(&format!(
-        "[6/6] Post-Quantum WilisKEM CCA2 Check ({} trials + FO Implicit Rejection)\n",
+        "[6/7] Post-Quantum WilisKEM CCA2 Check ({} trials + FO Implicit Rejection)\n",
         summary.kem_cca2.trials
     ));
     out.push_str(&format!(
@@ -153,6 +158,15 @@ pub fn format_audit_report(summary: &AuditSummary) -> String {
         summary.kem_cca2.zero_failures,
         summary.kem_cca2.implicit_rejection_ok,
         if summary.kem_cca2.passed { "PASS" } else { "FAIL" }
+    ));
+
+    out.push_str("[7/7] Post-Quantum Protocols (WPKE v2 Multi-Recipient, PQ-PCS Ratchet, WilisPad)\n");
+    out.push_str(&format!(
+        "  WPKE v2 Multi : {} | PQ-PCS Ratchet : {} | WilisPad : {} -> {}\n\n",
+        summary.pq_protocols.wpke_v2_multi_ok,
+        summary.pq_protocols.pq_pcs_ratchet_ok,
+        summary.pq_protocols.padding_integrity_ok,
+        if summary.pq_protocols.passed { "PASS" } else { "FAIL" }
     ));
 
     out.push_str(&format!(

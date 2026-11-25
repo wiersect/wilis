@@ -11,7 +11,7 @@
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)](.github/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-*One original 384-bit permutation. Zero external crypto libraries. Post-quantum public-key encryption (Module-LWE KEM), post-quantum signatures (WOTS+ Merkle), AEAD, 16–64 MiB memory-hard KDF, forward-secret session ratchet, Shamir secret sharing, XOF/MAC, encrypted folders & vaults, cross-platform C/Python bindings, and 6-part live cryptanalysis.*
+*One original 384-bit permutation. Zero external crypto libraries. Multi-recipient streaming post-quantum encryption (Module-LWE KEM / WPKE v2), streaming post-quantum signatures (WOTS+ Merkle), Post-Compromise-Secure PQ ratchet, AEAD, 16–64 MiB memory-hard KDF, length-hiding padding, ASCII armor, Shamir secret sharing, XOF/MAC, encrypted folders & vaults, cross-platform C/Python bindings, and 7-part live cryptanalysis.*
 
 [Architecture](#architecture) · [Specification](SPECIFICATION.md) · [Audit Results](#verified-cryptanalysis--benchmarks) · [CLI Quickstart](#cli-quickstart) · [C / Python FFI](#c--python-bindings) · [Security](SECURITY.md)
 
@@ -27,9 +27,9 @@
 | :--- | :--- | :--- |
 | **`core/`** | **`WilisPerm-384`** | Hybrid ARX + constant-time bitsliced `Chi-5`/`Feistel-6` + invertible 3-tap diffusion; zero S-Box lookup tables |
 | **`aead/`** | **`WilisAEAD`** | 256-bit key, 192-bit nonce, 256-bit tag, 256-bit sponge capacity, dual key whitening, key-commitment |
-| **`kem/`** | **`WilisKEM`** | **Post-quantum** Module-LWE (`k=3`, `N=256`, `q=7681`, `49σ` margin) IND-CCA2 KEM + hybrid public-key encryption (`WPKE`) |
-| **`sign/`** | **`WilisSign`** | **Post-quantum** stateful hash-based signatures (`WOTS+` + Merkle tree) built strictly from `WilisHash-256` |
-| **`ratchet/`** | **`WilisRatchet`** | Forward-secret symmetric messaging ratchet with bounded out-of-order delivery & anti-replay/DoS protection |
+| **`kem/`** | **`WilisKEM`** | **Post-quantum** Module-LWE (`k=3`, `N=256`, `q=7681`, `49σ` margin) IND-CCA2 KEM + **multi-recipient streaming `WPKE` v2** (up to 64 anonymous recipients) |
+| **`sign/`** | **`WilisSign`** | **Post-quantum** stateful hash-based signatures (`WOTS+` + Merkle tree) with **constant-memory multi-GB streaming `WSIG` v2** |
+| **`ratchet/`** | **`WilisRatchet`** | Forward-secret symmetric ratchet (`WRAT`) + **Post-Quantum PCS Ratchet & Authenticated Handshake** (`WHSH`/`WRP2`/`WPRK`) |
 | **`kdf/`** | **`WilisKDF` v2** | **16–64 MiB** hybrid memory-hard KDF (data-independent Pass 0 + data-dependent Passes `1..T`) + **2FA Keyfile** |
 | **`hash/`** | **`WilisHash-256`** | Incremental & one-shot 256-bit sponge hash with 128-bit collision resistance margin |
 | **`xof/`** | **`WilisXOF`** | Arbitrary-length domain-separated Extendable-Output Sponge Function & deterministic PRNG |
@@ -38,8 +38,8 @@
 | **`stream/`** | **`WILS` v2 Stream** | Constant-memory 64 KiB chunked streaming AEAD blocking truncation, reordering, duplication, and tampering |
 | **`archive/`** | **`WilisDir`** | Custom recursive folder archiver (`WDIR` v1) hiding filenames & hierarchy + strict Zip-Slip & trailing-data protection |
 | **`vault/`** | **`WilisVault`** | Encrypted local secret & password store (`WVLT` v1) with atomic saves and full secret zeroization on drop |
-| **`audit/`** | **`wilis audit`** | 6-part scientific cryptanalysis suite: SAC (1–16), BIC, exact DDT/LAT, NIST randomness, related-key, KEM CCA2 |
-| **`ffi/`** | **`libwilis` C-ABI** | Native shared/static library (`include/wilis.h` + zero-dependency Python 3 wrapper `bindings/python/wilis_py.py`) |
+| **`audit/`** | **`wilis audit`** | **7-part** scientific cryptanalysis suite: SAC (1–16), BIC, exact DDT/LAT, NIST randomness, related-key, KEM CCA2, **WPKE v2 / PQ-PCS / WilisPad** |
+| **`ffi/`** | **`libwilis` C-ABI** | Native shared/static library (`include/wilis.h` + Python 3 wrapper: AEAD, MAC, Subkey, XOF, KDF, KEM & Post-Quantum Sign) |
 
 ## Architecture
 
@@ -56,7 +56,7 @@ flowchart TD
     HASH --> SPLIT["WilisSplit<br/>Shamir K-of-N over GF(2^8)"]
     AEAD --> STREAM["WILS v2 Stream & WilisDir<br/>64 KiB Chunks · Encrypted Folders"]
     AEAD --> VAULT["WilisVault<br/>Atomic Encrypted Secret Manager"]
-    P --> AUDIT["wilis audit (6-Part)<br/>SAC · BIC · DDT/LAT · NIST · Key-Sens · KEM"]
+    P --> AUDIT["wilis audit (7-Part)<br/>SAC · BIC · DDT/LAT · NIST · Key-Sens · KEM · PQ"]
     P --> FFI["libwilis C-FFI<br/>C99 Header & Python Binding"]
 ```
 
@@ -74,8 +74,8 @@ flowchart TD
 | **Keystream Randomness** (128 KiB) | Entropy **`7.99853` bits/B**, Monobit `0.50007`, Runs `Z=0.87`, χ² `267.85` | NIST SP 800-22 bounds | **PASS** |
 | **Related-Key Sensitivity** (256 flips) | **`50.07%`** ciphertext · **`49.89%`** tag diffusion | `[47.5% .. 52.5%]` | **PASS** |
 | **`WilisKEM` IND-CCA2 Self-Audit** | Zero decapsulation errors + FO implicit rejection | Exact match & tamper reject | **PASS** |
-| **Adversarial Parser Fuzz Audit** | 300+ malformed/truncated/overflow payloads across all 16 parsers | **Zero panics** | **PASS** |
-| **Cross-Platform CI & Test Suite** | **`42 / 42` tests passing** (Linux, macOS, Windows + KAT) | `-D warnings`, 0 external crates | **PASS** |
+| **Adversarial Parser Fuzz Audit** | 300+ malformed/truncated/overflow payloads across all 22 binary/text parsers | **Zero panics** | **PASS** |
+| **Cross-Platform CI & Test Suite** | **`48 / 48` tests passing** (Linux, macOS, Windows + KAT) | `-D warnings`, 0 external crates | **PASS** |
 
 ---
 
@@ -85,13 +85,13 @@ flowchart TD
 git clone https://github.com/wiersect/wilis.git
 cd wilis
 
-# Run all 42 tests (including locked KAT vectors, post-quantum KEM, WOTS+, ratchet, Shamir, vault, FFI & fuzz)
+# Run all 48 tests (including locked KAT vectors, WPKE v2, PQ-PCS ratchet, WOTS+, padding, armor, Shamir, vault, FFI & fuzz)
 cargo test
 
 # Build optimized CLI binary + native shared library (libwilis.so / .dylib / .dll)
 cargo build --release
 
-# Run 6-part scientific cryptanalysis audit, benchmark, and Python FFI self-test
+# Run 7-part scientific cryptanalysis audit, benchmark, and Python FFI self-test
 ./target/release/wilis audit
 ./target/release/wilis bench
 python3 bindings/python/wilis_py.py
@@ -101,32 +101,34 @@ python3 bindings/python/wilis_py.py
 
 ## CLI Quickstart
 
-### 1. Post-Quantum Public-Key Encryption (`WilisKEM` — No Shared Password Needed!)
+### 1. Multi-Recipient Streaming Post-Quantum Encryption (`WilisKEM` / `WPKE` v2)
 ```bash
-# Recipient generates a post-quantum Module-LWE keypair (.wkp public, .wks secret)
+# Recipients generate post-quantum Module-LWE keypairs (.wks secret, .wkp public)
 ./target/release/wilis kem-keygen --out alice
+./target/release/wilis kem-keygen --out bob
 
-# Anyone with alice.wkp encrypts a file directly to Alice
-./target/release/wilis pub-encrypt --pk alice.wkp --aad "invoice-2026" --in doc.pdf --out doc.wpke
+# Encrypt ONE file (streaming constant-memory) to multiple anonymous recipients (up to 64!)
+./target/release/wilis pub-encrypt --pk alice.wkp --pk bob.wkp --aad "team-2026" --in doc.pdf --out doc.wpke
 
-# Only Alice's secret key (alice.wks) can authenticate and decrypt it
-./target/release/wilis pub-decrypt --sk alice.wks --aad "invoice-2026" --in doc.wpke --out restored.pdf
+# Either Alice or Bob authenticates and decrypts it (supports WPKE v1, WPKE v2 & --armor)
+./target/release/wilis pub-decrypt --sk alice.wks --aad "team-2026" --in doc.wpke --out restored.pdf
 ```
 
-### 2. Symmetric Text, File & Full-Directory Encryption
+### 2. Symmetric Text (Length-Hiding Padding & ASCII Armor), File & Full-Directory Encryption
 ```bash
-./target/release/wilis encrypt-text --pass-prompt --strength paranoid "Hello Wilis!"
+./target/release/wilis encrypt-text --pass-prompt --strength paranoid --pad 256 --armor "Hello Wilis!"
+./target/release/wilis decrypt-text --pass-prompt --unpad "<ARMORED-OR-BASE64>"
 ./target/release/wilis encrypt-file --pass-prompt --keyfile my.key --strength high --in data.bin --out data.wils
 ./target/release/wilis encrypt-dir  --pass-prompt --strength high --in ./secrets_folder --out ./secrets.wils
 ./target/release/wilis decrypt-dir  --pass-prompt --in ./secrets.wils --out ./restored_folder
 ```
 
-### 3. Post-Quantum Digital Signatures (`WilisSign`), Shamir Split (`WilisSplit`), Vault & MAC
+### 3. Streaming Post-Quantum Digital Signatures (`WilisSign` / `WSIG` v2), Shamir Split, Vault & MAC
 ```bash
-# Post-quantum signatures
+# Streaming post-quantum signatures (multi-GB files in 64 KiB RAM + optional --armor)
 ./target/release/wilis sign-keygen --out mykey --height 6
-./target/release/wilis sign --sk mykey.wsk --in release.tar.gz --out release.tar.gz.wsig
-./target/release/wilis verify --pk mykey.wpk --in release.tar.gz --sig release.tar.gz.wsig
+./target/release/wilis sign --sk mykey.wsk --armor --in release.tar.gz --out release.tar.gz.wsig.asc
+./target/release/wilis verify --pk mykey.wpk --in release.tar.gz --sig release.tar.gz.wsig.asc
 
 # Shamir 3-of-5 threshold secret sharing
 ./target/release/wilis split-key --secret "<64-HEX-KEY>" --total 5 --threshold 3
@@ -175,9 +177,9 @@ wilis/
 ├── lib.rs / main.rs / error.rs # Library, CLI, and error entry points
 ├── core/                       # WilisPerm-384 core permutation
 ├── aead/                       # WilisAEAD duplex sponge authenticated encryption
-├── kem/                        # WilisKEM post-quantum Module-LWE IND-CCA2 & WPKE
-├── sign/                       # WilisSign post-quantum WOTS+ Merkle signatures
-├── ratchet/                    # WilisRatchet forward-secret symmetric messaging ratchet
+├── kem/                        # WilisKEM Module-LWE IND-CCA2, WPKE v1 & Multi-Recipient Streaming WPKE v2
+├── sign/                       # WilisSign post-quantum WOTS+ Merkle (direct WSIG v1 & streaming WSIG v2)
+├── ratchet/                    # WilisRatchet forward-secret chain & PQ Post-Compromise Security ratchet
 ├── kdf/                        # WilisKDF v2 hybrid memory-hard KDF (16–64 MiB + 2FA)
 ├── hash/                       # WilisHash-256 sponge hash
 ├── xof/                        # WilisXOF arbitrary-length extendable-output sponge
@@ -185,15 +187,15 @@ wilis/
 ├── split/                      # WilisSplit Shamir K-of-N over constant-time GF(2^8)
 ├── format/                     # WILS v1 & v2 container headers and sealing
 ├── stream/                     # Constant-memory chunked streaming AEAD
-├── archive/                    # WilisDir encrypted folder archiver (Zip-Slip & EOF safe)
+├── archive/                    # WilisDir encrypted folder archiver (Zip-Slip & TOCTOU safe)
 ├── vault/                      # WilisVault atomic encrypted secret store (zeroizing Drop)
-├── audit/                      # 6-part scientific cryptanalysis & KEM CCA2 audit suite
+├── audit/                      # 7-part scientific cryptanalysis & post-quantum protocol audit suite
 ├── ffi/                        # C-ABI exports (libwilis)
 ├── include/wilis.h             # C99 FFI header
 ├── bindings/python/wilis_py.py # Zero-dependency Python 3 ctypes wrapper
-├── utils/                      # Cross-platform CSPRNG (Unix/Windows), constant-time, zeroize, prompt
+├── utils/                      # CSPRNG (Unix/Win), constant-time, zeroize, WilisPad, WilisArmor, prompt
 ├── cli/                        # Zero-dependency CLI commands & parser
-└── tests/                      # 41 unit, locked KAT, security, post-quantum, ratchet, FFI & fuzz tests
+└── tests/                      # 48 unit, locked KAT, security, post-quantum, PCS ratchet, FFI & fuzz tests
 ```
 
 ---

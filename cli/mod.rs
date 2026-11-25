@@ -1,4 +1,4 @@
-//! Zero-dependency command-line interface for Wilis v0.4.7.
+//! Zero-dependency command-line interface for Wilis v0.5.0.
 
 pub mod args;
 pub mod audit_cmd;
@@ -28,8 +28,10 @@ pub fn run(raw_args: &[String]) -> Result<()> {
             auth,
             aad,
             mut plaintext,
+            pad_block,
+            armor,
         } => {
-            let res = text_cmd::run_encrypt(auth, &aad, &plaintext);
+            let res = text_cmd::run_encrypt_ex(auth, &aad, &plaintext, pad_block, armor);
             // SAFETY: Overwriting UTF-8 bytes with 0x00 preserves UTF-8 validity.
             zeroize_bytes(unsafe { plaintext.as_bytes_mut() });
             res
@@ -38,7 +40,8 @@ pub fn run(raw_args: &[String]) -> Result<()> {
             auth,
             aad,
             ciphertext_b64,
-        } => text_cmd::run_decrypt(auth, &aad, &ciphertext_b64),
+            unpad,
+        } => text_cmd::run_decrypt_ex(auth, &aad, &ciphertext_b64, unpad),
         Command::EncryptFile {
             auth,
             aad,
@@ -65,11 +68,12 @@ pub fn run(raw_args: &[String]) -> Result<()> {
         } => dir_cmd::run_decrypt_dir(auth, &aad, &input_file, &out_dir),
         Command::KemKeygen { out_prefix } => kem_cmd::run_kem_keygen(&out_prefix),
         Command::PubEncrypt {
-            pk_path,
+            pk_paths,
             aad,
             input_path,
             output_path,
-        } => kem_cmd::run_pub_encrypt(&pk_path, &aad, &input_path, &output_path),
+            armor,
+        } => kem_cmd::run_pub_encrypt_multi(&pk_paths, &aad, &input_path, &output_path, armor),
         Command::PubDecrypt {
             sk_path,
             aad,
@@ -87,7 +91,8 @@ pub fn run(raw_args: &[String]) -> Result<()> {
             sk_path,
             input_path,
             sig_out_path,
-        } => sign_cmd::run_sign_file(&sk_path, &input_path, &sig_out_path),
+            armor,
+        } => sign_cmd::run_sign_file_ex(&sk_path, &input_path, &sig_out_path, armor),
         Command::VerifyFile {
             pk_path,
             input_path,

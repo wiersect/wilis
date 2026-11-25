@@ -1,4 +1,4 @@
-//! C-ABI exported cryptographic functions for `libwilis` v0.4.7.
+//! C-ABI exported cryptographic functions for `libwilis` v0.5.0.
 //!
 //! Safety & hardening guarantees:
 //! - Every `extern "C"` boundary catches Rust panics via `std::panic::catch_unwind`
@@ -26,7 +26,8 @@ use crate::kem::{
     decapsulate, encapsulate, keygen, KemCiphertext, KemPublicKey, KemSecretKey, KEM_CT_BYTES,
     KEM_PK_BYTES, KEM_SK_BYTES, KEM_SS_BYTES,
 };
-use crate::mac::mac;
+use crate::mac::{derive_subkey, mac};
+use crate::sign::{Signature, SigningKey, VerifyingKey, SIGN_PK_BYTES, SIGN_SK_BYTES};
 use crate::utils::random::fill_random;
 use crate::utils::zeroize::zeroize_bytes;
 use crate::xof::WilisXof;
@@ -464,6 +465,188 @@ pub unsafe extern "C" fn wilis_random_bytes(out: *mut u8, len: usize) -> i32 {
         match fill_random(buf) {
             Ok(()) => WILIS_OK,
             Err(_) => WILIS_ERR_INTERNAL,
+        }
+    })
+}
+
+/// Returns a static NUL-terminated UTF-8 library version string (e.g. `"0.5.0"`).
+#[no_mangle]
+pub extern "C" fn wilis_version() -> *const core::ffi::c_char {
+    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const core::ffi::c_char
+}
+
+/// Derives a domain-separated 256-bit subkey from `master_key_32` and `context[..context_len]`.
+///
+/// # Safety
+/// - `master_key_32` and `subkey_32_out` must point to 32 readable/writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_subkey_derive(
+    master_key_32: *const u8,
+    context: *const u8,
+    context_len: usize,
+    subkey_32_out: *mut u8,
+) -> i32 {
+    ffi_guard(|| {
+        if master_key_32.is_null() || subkey_32_out.is_null() {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let subkey = {
+            let ctx = match read_slice(context, context_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let mut mk: [u8; KEY_BYTES] = slice::from_raw_parts(master_key_32, KEY_BYTES)
+                .try_into()
+                .expect("32 bytes");
+            let sk = derive_subkey(&mk, ctx);
+            zeroize_bytes(&mut mk);
+            sk
+        };
+        slice::from_raw_parts_mut(subkey_32_out, KEY_BYTES).copy_from_slice(subkey.as_bytes());
+        WILIS_OK
+    })
+}
+
+/// Generates a post-quantum `WilisSign` Merkle keypair with tree `height` (`2..=10`),
+/// writing `pk_out` (`101` B) and `sk_out` (`137` B).
+///
+/// # Safety
+/// - `pk_out` and `sk_out` must be non-overlapping writable buffers of `101` and `137` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_sign_keygen(
+    height: u8,
+    pk_out: *mut u8,
+    sk_out: *mut u8,
+) -> i32 {
+    ffi_guard(|| {
+        if pk_out.is_null()
+            || sk_out.is_null()
+            || ranges_overlap(pk_out, SIGN_PK_BYTES, sk_out, SIGN_SK_BYTES)
+        {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        match SigningKey::generate(height) {
+            Ok((sk, pk)) => {
+                slice::from_raw_parts_mut(pk_out, SIGN_PK_BYTES).copy_from_slice(&pk.to_bytes());
+                let mut sk_bytes = sk.to_bytes();
+                slice::from_raw_parts_mut(sk_out, SIGN_SK_BYTES).copy_from_slice(&sk_bytes);
+                zeroize_bytes(&mut sk_bytes);
+                WILIS_OK
+            }
+            Err(_) => {
+                zeroize_bytes(slice::from_raw_parts_mut(pk_out, SIGN_PK_BYTES));
+                zeroize_bytes(slice::from_raw_parts_mut(sk_out, SIGN_SK_BYTES));
+                WILIS_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Signs `msg[..msg_len]` with a stateful `WSK1` secret key (`137` B), atomically updating
+/// `sk_inout` in place with the incremented leaf counter and writing the `WSIG` v1 signature
+/// to `sig_out[..*sig_len_out]`.
+///
+/// # Safety
+/// - `sk_inout` (`137` B), `sig_out` (`sig_cap` B), and `sig_len_out` must be valid and non-overlapping.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_sign_message(
+    sk_inout: *mut u8,
+    msg: *const u8,
+    msg_len: usize,
+    sig_out: *mut u8,
+    sig_cap: usize,
+    sig_len_out: *mut usize,
+) -> i32 {
+    ffi_guard(|| {
+        if sk_inout.is_null()
+            || sig_out.is_null()
+            || sig_len_out.is_null()
+            || !valid_slice_len(sig_cap)
+            || ranges_overlap(sk_inout, SIGN_SK_BYTES, sig_out, sig_cap)
+        {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        if msg_len > 0
+            && (ranges_overlap(msg, msg_len, sk_inout, SIGN_SK_BYTES)
+                || ranges_overlap(msg, msg_len, sig_out, sig_cap))
+        {
+            return WILIS_ERR_INVALID_ARG;
+        }
+
+        let sign_res = {
+            let msg_slice = match read_slice(msg, msg_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let mut sk = match SigningKey::from_bytes(slice::from_raw_parts(sk_inout, SIGN_SK_BYTES)) {
+                Ok(k) => k,
+                Err(_) => return WILIS_ERR_INVALID_ARG,
+            };
+            let expected_sig_len = 10 + HASH_BYTES + (67 + sk.verifying_key().height as usize) * HASH_BYTES;
+            if sig_cap < expected_sig_len {
+                return WILIS_ERR_INVALID_ARG;
+            }
+            match sk.sign(msg_slice) {
+                Ok(sig) => Ok((sk.to_bytes(), sig.to_bytes())),
+                Err(_) => Err(()),
+            }
+        };
+
+        match sign_res {
+            Ok((mut updated_sk, sig_bytes)) => {
+                slice::from_raw_parts_mut(sk_inout, SIGN_SK_BYTES).copy_from_slice(&updated_sk);
+                zeroize_bytes(&mut updated_sk);
+                slice::from_raw_parts_mut(sig_out, sig_bytes.len()).copy_from_slice(&sig_bytes);
+                *sig_len_out = sig_bytes.len();
+                WILIS_OK
+            }
+            Err(()) => {
+                *sig_len_out = 0;
+                WILIS_ERR_INTERNAL
+            }
+        }
+    })
+}
+
+/// Verifies a `WSIG` v1 signature `sig[..sig_len]` over `msg[..msg_len]` using `pk` (`101` B).
+///
+/// Returns `WILIS_OK` (`0`) if valid, `WILIS_ERR_AUTH_FAILED` (`-2`) if invalid, or
+/// `WILIS_ERR_INVALID_ARG` (`-1`) on malformed key/pointers.
+///
+/// # Safety
+/// - `pk` must point to `101` readable bytes; `sig` to `sig_len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_verify_message(
+    pk: *const u8,
+    msg: *const u8,
+    msg_len: usize,
+    sig: *const u8,
+    sig_len: usize,
+) -> i32 {
+    ffi_guard(|| {
+        if pk.is_null() {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let msg_slice = match read_slice(msg, msg_len) {
+            Some(s) => s,
+            None => return WILIS_ERR_INVALID_ARG,
+        };
+        let sig_slice = match read_slice(sig, sig_len) {
+            Some(s) => s,
+            None => return WILIS_ERR_INVALID_ARG,
+        };
+        let vk = match VerifyingKey::from_bytes(slice::from_raw_parts(pk, SIGN_PK_BYTES)) {
+            Ok(k) => k,
+            Err(_) => return WILIS_ERR_INVALID_ARG,
+        };
+        let sig_obj = match Signature::from_bytes(sig_slice) {
+            Ok(s) => s,
+            Err(_) => return WILIS_ERR_AUTH_FAILED,
+        };
+        if vk.verify(msg_slice, &sig_obj) {
+            WILIS_OK
+        } else {
+            WILIS_ERR_AUTH_FAILED
         }
     })
 }

@@ -1,7 +1,13 @@
-//! Related-key sensitivity test for `WilisAEAD` and live IND-CCA2 self-audit for `WilisKEM`.
+//! Related-key sensitivity test for `WilisAEAD`, live IND-CCA2 self-audit for `WilisKEM`,
+//! and v0.5.0 protocol audit for `WPKE` v2 multi-recipient streaming, PQ PCS ratchet & `WilisPad`.
 
 use crate::aead::seal;
-use crate::kem::{decapsulate, encapsulate, keygen};
+use crate::kem::{
+    decapsulate, encapsulate, keygen, pub_decrypt_multi, pub_encrypt_multi,
+};
+use crate::ratchet::PqRatchetSession;
+use crate::sign::SigningKey;
+use crate::utils::padding::{pad_to_block, unpad_strict};
 
 /// Results from flipping every single bit of a 256-bit `WilisAEAD` key.
 #[derive(Debug, Clone)]
@@ -114,5 +120,83 @@ pub fn analyze_kem_cca2(trials: usize) -> KemAuditResult {
         zero_failures,
         implicit_rejection_ok,
         passed: zero_failures && implicit_rejection_ok,
+    }
+}
+
+/// Results from live v0.5.0 post-quantum protocol verification (`WPKE` v2, PQ PCS ratchet, `WilisPad`).
+#[derive(Debug, Clone)]
+pub struct PqProtocolAuditResult {
+    pub wpke_v2_multi_ok: bool,
+    pub pq_pcs_ratchet_ok: bool,
+    pub padding_integrity_ok: bool,
+    pub passed: bool,
+}
+
+/// Verifies multi-recipient anonymous `WPKE` v2 encryption, `PqRatchetSession` mutual
+/// handshake + PCS rekeying, and `WilisPad` constant-time tamper rejection.
+pub fn analyze_pq_protocols() -> PqProtocolAuditResult {
+    let wpke_v2_multi_ok = (|| -> bool {
+        let Ok((sk1, pk1)) = keygen() else { return false };
+        let Ok((sk2, pk2)) = keygen() else { return false };
+        let Ok((sk_outsider, _)) = keygen() else { return false };
+        let msg = b"Wilis v0.5.0 multi-recipient post-quantum audit payload";
+        let Ok(pkt) = pub_encrypt_multi(&[&pk1, &pk2], msg, b"audit-aad") else { return false };
+        let ok1 = pub_decrypt_multi(&sk1, &pkt, b"audit-aad").map(|p| p == msg).unwrap_or(false);
+        let ok2 = pub_decrypt_multi(&sk2, &pkt, b"audit-aad").map(|p| p == msg).unwrap_or(false);
+        let outsider_rej = pub_decrypt_multi(&sk_outsider, &pkt, b"audit-aad").is_err();
+        ok1 && ok2 && outsider_rej
+    })();
+
+    let pq_pcs_ratchet_ok = (|| -> bool {
+        let Ok((mut alice_sign_sk, alice_vk)) = SigningKey::generate(2) else { return false };
+        let Ok((bob_kem_sk, bob_kem_pk)) = keygen() else { return false };
+        let Ok((mut alice, init)) =
+            PqRatchetSession::initiate_handshake(&mut alice_sign_sk, &bob_kem_pk, b"audit-ctx")
+        else {
+            return false;
+        };
+        let Ok(mut bob) =
+            PqRatchetSession::accept_handshake(&bob_kem_sk, &alice_vk, &init, b"audit-ctx")
+        else {
+            return false;
+        };
+        let m0 = alice.encrypt_next(b"epoch-0", b"");
+        if bob.decrypt_packet(&m0, b"").map(|p| p != b"epoch-0").unwrap_or(true) {
+            return false;
+        }
+        // PCS rekey round-trip + forged rekey rejection
+        let Ok(mut rk1) = alice.initiate_rekey() else { return false };
+        rk1.mac_tag[0] ^= 0x01;
+        if bob.accept_rekey(&rk1).is_ok() {
+            return false;
+        }
+        rk1.mac_tag[0] ^= 0x01;
+        if bob.accept_rekey(&rk1).is_err() {
+            return false;
+        }
+        let m1 = bob.encrypt_next(b"epoch-1-healed", b"");
+        alice
+            .decrypt_packet(&m1, b"")
+            .map(|p| p == b"epoch-1-healed" && alice.epoch() == 1)
+            .unwrap_or(false)
+    })();
+
+    let padding_integrity_ok = (|| -> bool {
+        let Ok(mut padded) = pad_to_block(b"short", 64) else { return false };
+        if padded.len() != 64 {
+            return false;
+        }
+        if unpad_strict(&padded).map(|u| u != b"short").unwrap_or(true) {
+            return false;
+        }
+        padded[63] ^= 0x01;
+        unpad_strict(&padded).is_err()
+    })();
+
+    PqProtocolAuditResult {
+        wpke_v2_multi_ok,
+        pq_pcs_ratchet_ok,
+        padding_integrity_ok,
+        passed: wpke_v2_multi_ok && pq_pcs_ratchet_ok && padding_integrity_ok,
     }
 }

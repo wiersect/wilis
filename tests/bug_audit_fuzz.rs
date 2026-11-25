@@ -7,13 +7,17 @@ use std::io::Cursor;
 
 use wilis::archive::unpack_directory;
 use wilis::format::{decrypt_with_key, decrypt_with_passphrase, ContainerHeader};
-use wilis::kem::{pub_decrypt, keygen, KemCiphertext, KemPublicKey, KemSecretKey};
-use wilis::ratchet::RatchetPacket;
+use wilis::kem::{
+    keygen, pub_decrypt, pub_decrypt_multi, KemCiphertext, KemPublicKey, KemSecretKey,
+};
+use wilis::ratchet::{HandshakeInit, PqMessagePacket, PqRekeyPacket, RatchetPacket};
 use wilis::sign::{Signature, SigningKey, VerifyingKey};
 use wilis::split::{combine_shares, Share};
 use wilis::stream::decrypt_stream_with_key;
+use wilis::utils::armor::armor_decode;
 use wilis::utils::base64::decode_base64;
 use wilis::utils::hex::decode_hex;
+use wilis::utils::padding::unpad_strict;
 use wilis::vault::Vault;
 use wilis::xof::WilisXof;
 
@@ -37,7 +41,12 @@ fn all_parsers_are_panic_free_on_adversarial_and_fuzz_inputs() {
         b"WSIG\x01\x06\x00\x00\x00\x00".to_vec(),
         b"WSHR\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec(),
         b"WPKE\x01".to_vec(),
+        b"WPKE\x02\x40\x00\x04\x00\x00".to_vec(),
         b"WRAT\x01\x00\x00\x00\x00\x00\x00\x00\x00".to_vec(),
+        b"WHSH\x01".to_vec(),
+        b"WRP2\x01\x00\x00\x00\x00\x00\x00\x00\x00".to_vec(),
+        b"WPRK\x01\x00\x00\x00\x00\x00\x00\x00\x00".to_vec(),
+        b"WPAD\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x80".to_vec(),
     ];
 
     // Add 300 pseudo-random payloads of varying sizes (1..=300 bytes)
@@ -63,12 +72,18 @@ fn all_parsers_are_panic_free_on_adversarial_and_fuzz_inputs() {
         let _ = KemSecretKey::from_bytes(data);
         let _ = KemCiphertext::from_bytes(data);
         let _ = pub_decrypt(&kem_sk, data, b"");
+        let _ = pub_decrypt_multi(&kem_sk, data, b"");
         let _ = RatchetPacket::from_bytes(data);
+        let _ = HandshakeInit::from_bytes(data);
+        let _ = PqMessagePacket::from_bytes(data);
+        let _ = PqRekeyPacket::from_bytes(data);
+        let _ = unpad_strict(data);
 
         if let Ok(as_str) = core::str::from_utf8(data) {
             let _ = decode_base64(as_str);
             let _ = decode_hex(as_str);
             let _ = Share::decode_string(as_str);
+            let _ = armor_decode(as_str, None);
         }
     }
 

@@ -1,4 +1,7 @@
-//! `WilisSign` keypair generation, signing, verification, and binary serialization.
+//! `WilisSign` keypair generation, one-shot (`WSIG` v1) & streaming multi-GB (`WSIG` v2)
+//! signing, verification, and binary serialization.
+
+use std::io::{self, Read};
 
 use crate::core::constants::HASH_BYTES;
 use crate::error::{Result, WilisError};
@@ -17,6 +20,18 @@ pub const MIN_TREE_HEIGHT: u8 = 2;
 
 /// Maximum supported Merkle tree height (`2^10 = 1024` signatures).
 pub const MAX_TREE_HEIGHT: u8 = 10;
+
+/// Serialized `WPK1` verifying key size in bytes (`4 + 1 + 32 + 32 + 32 = 101`).
+pub const SIGN_PK_BYTES: usize = 4 + 1 + HASH_BYTES * 3;
+
+/// Serialized `WSK1` signing key size in bytes (`4 + 1 + 4 + 32*4 = 137`).
+pub const SIGN_SK_BYTES: usize = 4 + 1 + 4 + HASH_BYTES * 4;
+
+/// Signature wire format version 1: direct randomized hashing over in-memory message bytes.
+pub const SIG_VERSION_V1: u8 = 1;
+
+/// Signature wire format version 2: domain-separated pre-hashed streaming file signatures (`O(1)` RAM).
+pub const SIG_VERSION_V2: u8 = 2;
 
 const SK_MAGIC: [u8; 4] = *b"WSK1";
 const PK_MAGIC: [u8; 4] = *b"WPK1";
@@ -43,6 +58,8 @@ pub struct SigningKey {
 /// Post-quantum `WilisSign` signature containing WOTS+ chains and Merkle auth path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
+    /// Wire format version (`SIG_VERSION_V1 = 1` direct, `SIG_VERSION_V2 = 2` streaming pre-hash).
+    pub version: u8,
     pub height: u8,
     pub leaf_index: u32,
     pub randomizer: [u8; HASH_BYTES],
@@ -65,6 +82,51 @@ fn hash_randomized_message(
     h.update(&leaf_index.to_le_bytes());
     h.update(&(message.len() as u64).to_le_bytes());
     h.update(message);
+    h.finalize()
+}
+
+fn hash_stream_prehash<R: Read>(reader: &mut R) -> Result<[u8; HASH_BYTES]> {
+    let mut h = WilisHash::new();
+    h.update(b"WSIG_ST2");
+    let mut buf = [0u8; 64 * 1024];
+    let read_res = (|| -> Result<u64> {
+        let mut total: u64 = 0;
+        loop {
+            let n = match reader.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            };
+            if n == 0 {
+                break;
+            }
+            h.update(&buf[..n]);
+            total = total
+                .checked_add(n as u64)
+                .ok_or_else(|| WilisError::InvalidFormat("signed stream length overflow".into()))?;
+        }
+        Ok(total)
+    })();
+    zeroize_bytes(&mut buf);
+    let total = read_res?;
+    h.update(&total.to_le_bytes());
+    Ok(h.finalize())
+}
+
+fn hash_randomized_stream_digest(
+    randomizer: &[u8; HASH_BYTES],
+    pub_seed: &[u8; HASH_BYTES],
+    root: &[u8; HASH_BYTES],
+    leaf_index: u32,
+    stream_digest: &[u8; HASH_BYTES],
+) -> [u8; HASH_BYTES] {
+    let mut h = WilisHash::new();
+    h.update(b"WSIG_MG2");
+    h.update(randomizer);
+    h.update(pub_seed);
+    h.update(root);
+    h.update(&leaf_index.to_le_bytes());
+    h.update(stream_digest);
     h.finalize()
 }
 
@@ -151,6 +213,49 @@ impl SigningKey {
         let auth_path = extract_auth_path(&levels, leaf_index);
 
         Ok(Signature {
+            version: SIG_VERSION_V1,
+            height: self.height,
+            leaf_index,
+            randomizer,
+            wots_sig,
+            auth_path,
+        })
+    }
+
+    /// Streams an arbitrarily large `reader` in constant 64 KiB RAM and signs its
+    /// domain-separated `WSIG` v2 digest without buffering the entire file in memory.
+    ///
+    /// Reads the entire stream and draws OS randomness BEFORE advancing `next_index`
+    /// so I/O or RNG failures never burn a one-time WOTS+ leaf.
+    pub fn sign_stream<R: Read>(&mut self, reader: &mut R) -> Result<Signature> {
+        let max_sigs = self.max_signatures();
+        if self.next_index >= max_sigs {
+            return Err(WilisError::InvalidKey(format!(
+                "signing key exhausted: all {max_sigs} one-time signatures have been used; generate a new keypair"
+            )));
+        }
+
+        // Complete stream I/O and RNG BEFORE advancing next_index
+        let stream_digest = hash_stream_prehash(reader)?;
+        let mut randomizer = [0u8; HASH_BYTES];
+        fill_random(&mut randomizer)?;
+
+        let leaf_index = self.next_index;
+        self.next_index += 1;
+
+        let digest = hash_randomized_stream_digest(
+            &randomizer,
+            &self.pub_seed,
+            &self.root,
+            leaf_index,
+            &stream_digest,
+        );
+        let wots_sig = wots_sign_digest(&self.secret_seed, &self.pub_seed, leaf_index, &digest);
+        let levels = build_merkle_tree(&self.secret_seed, &self.pub_seed, self.height);
+        let auth_path = extract_auth_path(&levels, leaf_index);
+
+        Ok(Signature {
+            version: SIG_VERSION_V2,
             height: self.height,
             leaf_index,
             randomizer,
@@ -239,8 +344,11 @@ impl Drop for SigningKey {
 }
 
 impl VerifyingKey {
-    /// Verifies `signature` over `message` in constant time.
+    /// Verifies a `WSIG` v1 `signature` over in-memory `message` in constant time.
     pub fn verify(&self, message: &[u8], signature: &Signature) -> bool {
+        if signature.version != SIG_VERSION_V1 {
+            return false;
+        }
         if !(MIN_TREE_HEIGHT..=MAX_TREE_HEIGHT).contains(&self.height) {
             return false;
         }
@@ -276,6 +384,43 @@ impl VerifyingKey {
         );
 
         ct_eq(&recovered_root, &self.root)
+    }
+
+    /// Streams an arbitrarily large `reader` in constant 64 KiB RAM and verifies
+    /// a `WSIG` v2 streaming signature in constant time.
+    pub fn verify_stream<R: Read>(&self, reader: &mut R, signature: &Signature) -> Result<bool> {
+        if signature.version != SIG_VERSION_V2
+            || !(MIN_TREE_HEIGHT..=MAX_TREE_HEIGHT).contains(&self.height)
+            || signature.height != self.height
+            || signature.auth_path.len() != self.height as usize
+            || signature.leaf_index >= (1u32 << self.height)
+        {
+            return Ok(false);
+        }
+
+        let stream_digest = hash_stream_prehash(reader)?;
+        let digest = hash_randomized_stream_digest(
+            &signature.randomizer,
+            &self.pub_seed,
+            &self.root,
+            signature.leaf_index,
+            &stream_digest,
+        );
+
+        let leaf_hash = wots_recover_leaf_pk_hash(
+            &signature.wots_sig,
+            &self.pub_seed,
+            signature.leaf_index,
+            &digest,
+        );
+        let recovered_root = compute_root_from_path(
+            &self.pub_seed,
+            leaf_hash,
+            signature.leaf_index,
+            &signature.auth_path,
+        );
+
+        Ok(ct_eq(&recovered_root, &self.root))
     }
 
     /// Serializes the public key (`WPK1` header + height + pub_seed + root + checksum).
@@ -329,12 +474,12 @@ impl VerifyingKey {
 }
 
 impl Signature {
-    /// Serializes the signature into canonical `WSIG` v1 binary format.
+    /// Serializes the signature into canonical `WSIG` v1/v2 binary format.
     pub fn to_bytes(&self) -> Vec<u8> {
         let total = 4 + 1 + 1 + 4 + HASH_BYTES + (WOTS_LEN + self.auth_path.len()) * HASH_BYTES;
         let mut out = Vec::with_capacity(total);
         out.extend_from_slice(&SIG_MAGIC);
-        out.push(1u8); // version
+        out.push(self.version);
         out.push(self.height);
         out.extend_from_slice(&self.leaf_index.to_le_bytes());
         out.extend_from_slice(&self.randomizer);
@@ -347,13 +492,17 @@ impl Signature {
         out
     }
 
-    /// Parses a `WSIG` v1 binary signature.
+    /// Parses a `WSIG` v1 or v2 binary signature.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        if data.len() < 10 + HASH_BYTES || data[0..4] != SIG_MAGIC || data[4] != 1 {
+        if data.len() < 10 + HASH_BYTES
+            || data[0..4] != SIG_MAGIC
+            || (data[4] != SIG_VERSION_V1 && data[4] != SIG_VERSION_V2)
+        {
             return Err(WilisError::InvalidFormat(
                 "invalid or unsupported WilisSign signature format".into(),
             ));
         }
+        let version = data[4];
 
         let height = data[5];
         if !(MIN_TREE_HEIGHT..=MAX_TREE_HEIGHT).contains(&height) {
@@ -396,6 +545,7 @@ impl Signature {
         }
 
         Ok(Self {
+            version,
             height,
             leaf_index,
             randomizer,

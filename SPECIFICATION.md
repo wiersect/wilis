@@ -1,4 +1,4 @@
-# Wilis Cryptographic Specification (v0.4.7)
+# Wilis Cryptographic Specification (v0.5.0)
 
 This document defines the exact mathematical construction and binary container wire formats of the **Wilis** cryptographic suite.
 
@@ -151,8 +151,11 @@ Built exclusively from `WilisHash-256` (`n = 32` bytes), without relying on fact
   - $\text{mask} = H(\text{"WSIG\_BM1"} \| P_{\text{seed}} \| idx \| c \| s)$
   - $\text{key} = H(\text{"WSIG\_KY1"} \| P_{\text{seed}} \| idx \| c \| s)$
   - $v_{s+1} = H(\text{"WSIG\_FN1"} \| \text{key} \| (v_s \oplus \text{mask}))$
-- **Randomized Message Digest:** For fresh 256-bit CSPRNG randomizer $R$:
+- **Randomized Message Digest (`WSIG` v1 — direct in-memory):** For fresh 256-bit CSPRNG randomizer $R$:
   $$D = H(\text{"WSIG\_MG1"} \| R \| P_{\text{seed}} \| \text{root} \| idx \| |M|_{\text{le64}} \| M)$$
+- **Streaming Pre-Hashed Digest (`WSIG` v2 — constant 64 KiB RAM multi-GB files):** Streams $M$ in chunks into $H_{\text{stream}} = H(\text{"WSIG\_ST2"} \| M \| |M|_{\text{le64}})$, then computes:
+  $$D = H(\text{"WSIG\_MG2"} \| R \| P_{\text{seed}} \| \text{root} \| idx \| H_{\text{stream}})$$
+  Strict domain separation (`WSIG_MG1` vs `WSIG_MG2`) ensures `WSIG` v1 and `WSIG` v2 signatures can never cross-validate.
 - **Merkle Tree (`height` $\in [2, 10]$):** Supports $2^{\text{height}}$ stateful one-time signatures; secret keys refuse to sign once `next_index == 2^height`.
 
 ---
@@ -186,11 +189,29 @@ Built exclusively from `WilisHash-256` (`n = 32` bytes), without relying on fact
 - **Canonical 13-bit Packing:** 8 coefficients pack into 13 bytes (`416` bytes/poly). Unpacking rejects any coefficient $\ge 7681$.
 - **Fujisaki-Okamoto IND-CCA2 Transform:** Uses `WilisXOF("WKEM_FO_G1")` to derive $(\bar{k}, \text{coins})$ from $(m \| H(pk))$, verifies exact re-encryption in constant time (`ct_eq`), and branchlessly selects between $K_{\text{ok}}$ (`WKEM_FO_K1`) and implicit rejection key $K_{\text{rej}}$ (`WKEM_FO_R1` using secret $z$).
 - **`WPKE` v1 Packet:** `[ "WPKE": 4B ][ ver=1: 1B ][ kem_ct: 1668B ][ nonce: 24B ][ aead_ct: N ][ tag: 32B ]`, binding the entire prefix + user AAD into `WilisAEAD`.
+- **`WPKE` v2 Multi-Recipient Streaming Container:** Encrypts an arbitrary byte stream once with a fresh 256-bit File Encryption Key (`FEK`) across `1..=64` anonymous recipient slots in constant memory:
+  ```text
+  Header:
+    [ "WPKE": 4B ][ ver=2: 1B ][ count: u8 (1..=64) ][ chunk_size: u32 LE ][ stream_base_nonce: 24B ]
+    [ slot_0 .. slot_{count-1} ], each slot = 1756 bytes:
+      [ kem_ct: 1668B (WKC1) ][ wrap_nonce: 24B ][ wrapped_fek: 32B ][ wrap_tag: 32B ]
+  Body:
+    Canonical WILS v2 chunk frames encrypted under FEK with `header_digest = WilisHash-256(Header)`.
+  ```
+  Each slot wraps `FEK` under `kem_ss` with AAD `"WPKE_WRAP_V2" || slot_idx || count || chunk_size_le || stream_base_nonce`. Decapsulation evaluates every slot without early exit to prevent slot-index timing leakage.
 
 ---
 
-## 11. Forward-Secret Messaging Ratchet (`WilisRatchet`)
+## 11. Forward-Secret & Post-Compromise-Secure Messaging Ratchet (`WilisRatchet`)
 
-- Splits a 256-bit shared root secret via `WilisXOF("WRAT_INIT_V1")` into distinct `(send_chain, recv_chain)` keys.
-- Each message step derives `(next_chain_key, one_time_key, one_time_nonce)` via `WilisXOF("WRAT_STEP_V1")`, immediately overwriting the previous chain key (forward secrecy).
-- Incoming packets verify AEAD authentication on a speculative chain clone before committing state advancement, defeating forged-counter DoS while supporting out-of-order delivery up to `MAX_SKIP_WINDOW = 64` and rejecting all replays.
+- **Symmetric Forward-Secret Chain (`WRAT` v1):** Splits a 256-bit shared root secret via `WilisXOF("WRAT_INIT_V1")` into distinct `(send_chain, recv_chain)` keys. Each message step derives `(next_chain_key, one_time_key, one_time_nonce)` via `WilisXOF("WRAT_STEP_V1")`, immediately overwriting the previous chain key. Incoming packets verify AEAD authentication on a speculative chain clone before committing state advancement, supporting out-of-order delivery up to `MAX_SKIP_WINDOW = 64` and rejecting replays.
+- **Authenticated Post-Quantum Handshake (`WHSH` v1) & PCS Ratchet (`WRP2` / `WPRK` v1):**
+  - `WHSH` v1 combines a fresh `WilisKEM` encapsulation with an ephemeral `initiator_next_pk`, authenticated by a `WilisSign` signature over `WilisHash-256("WHSH_V1" || |ctx| || ctx || responder_pk || kem_ct || initiator_next_pk)`.
+  - `WPRK` v1 (`2997` bytes) performs a post-quantum `WilisKEM` ratchet step mixing fresh Module-LWE shared secret into `root_key` via `WilisXOF("WRAT_PQ_PCS_V1")`, rotating the sender's ephemeral `KemSecretKey`/`KemPublicKey`, and authenticating the packet with `WilisMAC` (`WPRK_TAG_V1`) before committing state — providing full **Post-Compromise Security (break-in recovery)** after one round-trip.
+
+---
+
+## 12. Canonical Length-Hiding Padding (`WilisPad`) & ASCII Armor (`WilisArmor`)
+
+- **`WilisPad` (`WPAD` v1):** Frames plaintext as `[ "WPAD": 4B ][ pt_len: u64 LE ][ plaintext ][ 0x80 ][ 0x00 ... ]` rounded up to an exact multiple of `block_size` (`16..=65536` bytes). `unpad_strict` verifies the `0x80` sentinel and every trailing zero byte in constant time.
+- **`WilisArmor`:** PEM-style ASCII armor (`-----BEGIN <LABEL>-----` ... `-----END <LABEL>-----`) with 64-character canonical RFC 4648 Base64 wrapping and a trailing `=<4-char Base64>` 24-bit `WilisHash-256("WARM_CHK_V1" || |label| || label || |data| || data)` integrity checksum verified in constant time.

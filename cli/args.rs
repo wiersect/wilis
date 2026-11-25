@@ -1,4 +1,4 @@
-//! Command-line argument parser and help text definitions for Wilis v0.4.7.
+//! Command-line argument parser and help text definitions for Wilis v0.5.0.
 
 use std::fmt;
 use std::path::Path;
@@ -126,11 +126,14 @@ pub enum Command {
         auth: AuthInput,
         aad: String,
         plaintext: String,
+        pad_block: Option<usize>,
+        armor: bool,
     },
     DecryptText {
         auth: AuthInput,
         aad: String,
         ciphertext_b64: String,
+        unpad: bool,
     },
     EncryptFile {
         auth: AuthInput,
@@ -160,10 +163,11 @@ pub enum Command {
         out_prefix: String,
     },
     PubEncrypt {
-        pk_path: String,
+        pk_paths: Vec<String>,
         aad: String,
         input_path: String,
         output_path: String,
+        armor: bool,
     },
     PubDecrypt {
         sk_path: String,
@@ -185,6 +189,7 @@ pub enum Command {
         sk_path: String,
         input_path: String,
         sig_out_path: String,
+        armor: bool,
     },
     VerifyFile {
         pk_path: String,
@@ -267,11 +272,12 @@ impl fmt::Debug for Command {
                 .debug_struct("KemKeygen")
                 .field("out_prefix", out_prefix)
                 .finish(),
-            Command::PubEncrypt { pk_path, input_path, output_path, .. } => f
+            Command::PubEncrypt { pk_paths, input_path, output_path, armor, .. } => f
                 .debug_struct("PubEncrypt")
-                .field("pk_path", pk_path)
+                .field("pk_paths", pk_paths)
                 .field("input_path", input_path)
                 .field("output_path", output_path)
+                .field("armor", armor)
                 .finish(),
             Command::PubDecrypt { sk_path, input_path, output_path, .. } => f
                 .debug_struct("PubDecrypt")
@@ -291,11 +297,12 @@ impl fmt::Debug for Command {
                 .field("out_prefix", out_prefix)
                 .field("height", height)
                 .finish(),
-            Command::SignFile { sk_path, input_path, sig_out_path } => f
+            Command::SignFile { sk_path, input_path, sig_out_path, armor } => f
                 .debug_struct("SignFile")
                 .field("sk_path", sk_path)
                 .field("input_path", input_path)
                 .field("sig_out_path", sig_out_path)
+                .field("armor", armor)
                 .finish(),
             Command::VerifyFile { pk_path, input_path, sig_path } => f
                 .debug_struct("VerifyFile")
@@ -343,21 +350,21 @@ USAGE:
   wilis <COMMAND> [OPTIONS]
 
 SYMMETRIC ENCRYPTION & ARCHIVING:
-  encrypt-text  (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--strength S] [--aad <T>] <TEXT>
-  decrypt-text  (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--aad <T>] <BASE64>
+  encrypt-text  (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--strength S] [--aad <T>] [--pad <N>] [--armor] <TEXT>
+  decrypt-text  (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--aad <T>] [--unpad] <BASE64|ARMOR>
   encrypt-file  (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--strength S] [--aad <T>] --in <F> --out <F>
   decrypt-file  (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--aad <T>] --in <F> --out <F>
   encrypt-dir   (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--strength S] [--aad <T>] --in <DIR> --out <F>
   decrypt-dir   (--pass <P> | --pass-prompt | --key <HEX>) [--keyfile <F>] [--aad <T>] --in <F> --out <DIR>
 
-POST-QUANTUM PUBLIC-KEY ENCRYPTION (WilisKEM — Module-LWE 768 IND-CCA2):
-  kem-keygen    --out <PREFIX>                    (writes <PREFIX>.wkp public & <PREFIX>.wks secret)
-  pub-encrypt   --pk <KEY.wkp> [--aad <T>] --in <FILE> --out <FILE.wpke>
+POST-QUANTUM PUBLIC-KEY ENCRYPTION (WilisKEM — Module-LWE 768 IND-CCA2 / WPKE v2 Multi-Recipient Streaming):
+  kem-keygen    --out <PREFIX>                    (writes <PREFIX>.wks secret & <PREFIX>.wkp public)
+  pub-encrypt   --pk <KEY.wkp> [--pk <KEY2.wkp> ...] [--aad <T>] [--armor] --in <FILE> --out <FILE.wpke>
   pub-decrypt   --sk <KEY.wks> [--aad <T>] --in <FILE.wpke> --out <FILE>
 
-POST-QUANTUM DIGITAL SIGNATURES (WilisSign — WOTS+ Merkle Tree):
+POST-QUANTUM DIGITAL SIGNATURES (WilisSign — WOTS+ Merkle Tree / Streaming WSIG v2):
   sign-keygen   --out <PREFIX> [--height 2..10]   (writes <PREFIX>.wsk and <PREFIX>.wpk)
-  sign          --sk <KEY.wsk> --in <FILE> --out <FILE.wsig>
+  sign          --sk <KEY.wsk> [--armor] --in <FILE> --out <FILE.wsig>
   verify        --pk <KEY.wpk> --in <FILE> --sig <FILE.wsig>
 
 ENCRYPTED SECRET VAULT & SHAMIR SECRET SHARING:
@@ -372,7 +379,7 @@ MAC, HASH, RANDOM & CRYPTANALYSIS:
   keygen        Generate a fresh 256-bit random hex key & WilisHash-256 Key ID.
   rand          --bytes <N>                       Generate N cryptographically secure random bytes (hex).
   bench         Run bijectivity, avalanche, and AEAD throughput benchmarks.
-  audit         Run 6-part scientific cryptanalysis (SAC, BIC, DDT/LAT, NIST, Related-Key, KEM CCA2).
+  audit         Run 7-part scientific cryptanalysis (SAC, BIC, DDT/LAT, NIST, Related-Key, KEM CCA2, PQ Protocols).
   help          Display this usage guide.",
         env!("CARGO_PKG_VERSION")
     )
@@ -527,6 +534,9 @@ fn parse_text_cmd(args: &[String], encrypt: bool) -> Result<Command> {
     let mut keyfile: Option<String> = None;
     let mut strength: Option<KdfStrength> = None;
     let mut aad: Option<String> = None;
+    let mut pad_block: Option<usize> = None;
+    let mut armor = false;
+    let mut unpad = false;
     let mut positional: Option<String> = None;
 
     let mut i = 0;
@@ -582,6 +592,32 @@ fn parse_text_cmd(args: &[String], encrypt: bool) -> Result<Command> {
                     i += 1;
                     continue;
                 }
+                "--pad" if encrypt => {
+                    i += 1;
+                    let s = req_val(args, i, "--pad")?;
+                    let b = s.parse::<usize>().map_err(|_| {
+                        WilisError::CliUsage(format!("invalid --pad '{s}' (expected 16..=65536)"))
+                    })?;
+                    set_once(&mut pad_block, b, "--pad")?;
+                    i += 1;
+                    continue;
+                }
+                "--armor" if encrypt => {
+                    if armor {
+                        return Err(WilisError::CliUsage("duplicate option '--armor'".into()));
+                    }
+                    armor = true;
+                    i += 1;
+                    continue;
+                }
+                "--unpad" if !encrypt => {
+                    if unpad {
+                        return Err(WilisError::CliUsage("duplicate option '--unpad'".into()));
+                    }
+                    unpad = true;
+                    i += 1;
+                    continue;
+                }
                 other if other.starts_with("--") => {
                     return Err(WilisError::CliUsage(format!("unknown option '{other}'")));
                 }
@@ -601,7 +637,7 @@ fn parse_text_cmd(args: &[String], encrypt: bool) -> Result<Command> {
         WilisError::CliUsage(if encrypt {
             "missing <PLAINTEXT> argument".into()
         } else {
-            "missing <BASE64> ciphertext argument".into()
+            "missing <BASE64|ARMOR> ciphertext argument".into()
         })
     })?;
 
@@ -619,12 +655,15 @@ fn parse_text_cmd(args: &[String], encrypt: bool) -> Result<Command> {
             auth,
             aad,
             plaintext: payload,
+            pad_block,
+            armor,
         })
     } else {
         Ok(Command::DecryptText {
             auth,
             aad,
             ciphertext_b64: payload,
+            unpad,
         })
     }
 }
@@ -759,16 +798,17 @@ fn parse_kem_keygen(args: &[String]) -> Result<Command> {
 }
 
 fn parse_pub_enc(args: &[String]) -> Result<Command> {
-    let mut pk: Option<String> = None;
+    let mut pk_paths: Vec<String> = Vec::new();
     let mut aad: Option<String> = None;
     let mut input: Option<String> = None;
     let mut out: Option<String> = None;
+    let mut armor = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--pk" => {
                 i += 1;
-                set_once(&mut pk, req_val(args, i, "--pk")?, "--pk")?;
+                pk_paths.push(req_val(args, i, "--pk")?);
             }
             "--aad" => {
                 i += 1;
@@ -782,15 +822,27 @@ fn parse_pub_enc(args: &[String]) -> Result<Command> {
                 i += 1;
                 set_once(&mut out, req_val(args, i, "--out")?, "--out")?;
             }
+            "--armor" => {
+                if armor {
+                    return Err(WilisError::CliUsage("duplicate option '--armor'".into()));
+                }
+                armor = true;
+            }
             other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
         }
         i += 1;
     }
+    if pk_paths.is_empty() {
+        return Err(WilisError::CliUsage(
+            "pub-encrypt requires at least one --pk <KEY.wkp>".into(),
+        ));
+    }
     Ok(Command::PubEncrypt {
-        pk_path: pk.ok_or_else(|| WilisError::CliUsage("pub-encrypt requires --pk <KEY.wkp>".into()))?,
+        pk_paths,
         aad: aad.unwrap_or_default(),
         input_path: input.ok_or_else(|| WilisError::CliUsage("pub-encrypt requires --in <FILE>".into()))?,
         output_path: out.ok_or_else(|| WilisError::CliUsage("pub-encrypt requires --out <FILE>".into()))?,
+        armor,
     })
 }
 
@@ -1001,6 +1053,7 @@ fn parse_sign_cmd(args: &[String]) -> Result<Command> {
     let mut sk: Option<String> = None;
     let mut input: Option<String> = None;
     let mut out: Option<String> = None;
+    let mut armor = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -1016,6 +1069,12 @@ fn parse_sign_cmd(args: &[String]) -> Result<Command> {
                 i += 1;
                 set_once(&mut out, req_val(args, i, "--out")?, "--out")?;
             }
+            "--armor" => {
+                if armor {
+                    return Err(WilisError::CliUsage("duplicate option '--armor'".into()));
+                }
+                armor = true;
+            }
             other => return Err(WilisError::CliUsage(format!("unknown option '{other}'"))),
         }
         i += 1;
@@ -1025,6 +1084,7 @@ fn parse_sign_cmd(args: &[String]) -> Result<Command> {
         input_path: input.ok_or_else(|| WilisError::CliUsage("sign requires --in <FILE>".into()))?,
         sig_out_path: out
             .ok_or_else(|| WilisError::CliUsage("sign requires --out <FILE.wsig>".into()))?,
+        armor,
     })
 }
 

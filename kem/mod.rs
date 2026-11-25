@@ -11,10 +11,15 @@
 
 pub mod hybrid;
 pub mod mlwe;
+pub mod multi;
 pub mod poly;
 
 pub use hybrid::{pub_decrypt, pub_encrypt};
 pub use mlwe::{
     decapsulate, encapsulate, keygen, KemCiphertext, KemPublicKey, KemSecretKey,
     KEM_CT_BYTES, KEM_PK_BYTES, KEM_SK_BYTES, KEM_SS_BYTES,
+};
+pub use multi::{
+    pub_decrypt_multi, pub_decrypt_multi_stream, pub_encrypt_multi, pub_encrypt_multi_stream,
+    MAX_WPKE_RECIPIENTS, WPKE_SLOT_BYTES, WPKE_VERSION_V2,
 };

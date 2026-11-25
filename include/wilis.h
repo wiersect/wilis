@@ -1,5 +1,5 @@
 /*
- * Wilis v0.4.7 — C Foreign Function Interface Header
+ * Wilis v0.5.0 — C Foreign Function Interface Header
  * Standalone zero-dependency cryptography built on WilisPerm-384.
  */
 
@@ -19,10 +19,14 @@ extern "C" {
 #define WILIS_TAG_BYTES     32
 #define WILIS_HASH_BYTES    32
 
-#define WILIS_KEM_PK_BYTES  1284
-#define WILIS_KEM_SK_BYTES  2600
-#define WILIS_KEM_CT_BYTES  1668
-#define WILIS_KEM_SS_BYTES  32
+#define WILIS_KEM_PK_BYTES       1284
+#define WILIS_KEM_SK_BYTES       2600
+#define WILIS_KEM_CT_BYTES       1668
+#define WILIS_KEM_SS_BYTES       32
+
+#define WILIS_SIGN_PK_BYTES      101
+#define WILIS_SIGN_SK_BYTES      137
+#define WILIS_SIGN_MAX_SIG_BYTES 2506
 
 #define WILIS_OK              0
 #define WILIS_ERR_INVALID_ARG (-1)
@@ -102,6 +106,38 @@ int32_t wilis_kem_decapsulate(
 int32_t wilis_random_bytes(
     uint8_t *out,
     size_t len
+);
+
+const char *wilis_version(void);
+
+int32_t wilis_subkey_derive(
+    const uint8_t master_key_32[WILIS_KEY_BYTES],
+    const uint8_t *context,
+    size_t context_len,
+    uint8_t subkey_32_out[WILIS_KEY_BYTES]
+);
+
+int32_t wilis_sign_keygen(
+    uint8_t height,
+    uint8_t pk_out[WILIS_SIGN_PK_BYTES],
+    uint8_t sk_out[WILIS_SIGN_SK_BYTES]
+);
+
+int32_t wilis_sign_message(
+    uint8_t sk_inout[WILIS_SIGN_SK_BYTES],
+    const uint8_t *msg,
+    size_t msg_len,
+    uint8_t *sig_out,
+    size_t sig_cap,
+    size_t *sig_len_out
+);
+
+int32_t wilis_verify_message(
+    const uint8_t pk[WILIS_SIGN_PK_BYTES],
+    const uint8_t *msg,
+    size_t msg_len,
+    const uint8_t *sig,
+    size_t sig_len
 );
 
 #ifdef __cplusplus
