@@ -40,6 +40,12 @@ pub fn run_encrypt(
             "input and output paths must not refer to the same file".into(),
         ));
     }
+    if out_p.is_dir() {
+        return Err(WilisError::InvalidParameters(format!(
+            "output path '{}' is an existing directory",
+            output_path
+        )));
+    }
 
     let (tmp_path, tmp_file) = create_unique_temp_file(out_p, false)?;
     let res = (|| -> Result<(u64, u64)> {
@@ -104,6 +110,12 @@ pub fn run_decrypt(
         return Err(WilisError::InvalidParameters(
             "input and output paths must not refer to the same file".into(),
         ));
+    }
+    if out_p.is_dir() {
+        return Err(WilisError::InvalidParameters(format!(
+            "output path '{}' is an existing directory",
+            output_path
+        )));
     }
 
     // Peek first 5 bytes to detect v1 vs v2 container version (preserving real OS I/O errors)

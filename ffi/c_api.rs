@@ -1,4 +1,4 @@
-//! C-ABI exported cryptographic functions for `libwilis` v0.4.6.
+//! C-ABI exported cryptographic functions for `libwilis` v0.4.7.
 //!
 //! Safety & hardening guarantees:
 //! - Every `extern "C"` boundary catches Rust panics via `std::panic::catch_unwind`
@@ -386,7 +386,9 @@ pub unsafe extern "C" fn wilis_kem_encapsulate(
         {
             return WILIS_ERR_INVALID_ARG;
         }
-        let pk_obj = match KemPublicKey::from_bytes(slice::from_raw_parts(pk, KEM_PK_BYTES)) {
+        let pk_res = { KemPublicKey::from_bytes(slice::from_raw_parts(pk, KEM_PK_BYTES)) };
+        // Input borrow of `pk` has ended before any mutable output slice is created (alias-safe)
+        let pk_obj = match pk_res {
             Ok(k) => k,
             Err(_) => {
                 zeroize_bytes(slice::from_raw_parts_mut(ct_out, KEM_CT_BYTES));
@@ -424,24 +426,24 @@ pub unsafe extern "C" fn wilis_kem_decapsulate(
             return WILIS_ERR_INVALID_ARG;
         }
         let ss_res = {
-            let sk_obj = match KemSecretKey::from_bytes(slice::from_raw_parts(sk, KEM_SK_BYTES)) {
-                Ok(k) => k,
-                Err(_) => return {
-                    zeroize_bytes(slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES));
-                    WILIS_ERR_INVALID_ARG
-                },
-            };
-            let ct_obj = match KemCiphertext::from_bytes(slice::from_raw_parts(ct, KEM_CT_BYTES)) {
-                Ok(c) => c,
-                Err(_) => return {
-                    zeroize_bytes(slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES));
-                    WILIS_ERR_INVALID_ARG
-                },
-            };
-            decapsulate(&sk_obj, &ct_obj)
+            let sk_res = KemSecretKey::from_bytes(slice::from_raw_parts(sk, KEM_SK_BYTES));
+            let ct_res = KemCiphertext::from_bytes(slice::from_raw_parts(ct, KEM_CT_BYTES));
+            match (sk_res, ct_res) {
+                (Ok(sk_obj), Ok(ct_obj)) => Ok(decapsulate(&sk_obj, &ct_obj)),
+                _ => Err(()),
+            }
         };
-        slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES).copy_from_slice(ss_res.as_bytes());
-        WILIS_OK
+        // All input borrows (`sk`, `ct`) have ended before writing/zeroizing `ss_32_out` (alias-safe)
+        match ss_res {
+            Ok(ss) => {
+                slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES).copy_from_slice(ss.as_bytes());
+                WILIS_OK
+            }
+            Err(()) => {
+                zeroize_bytes(slice::from_raw_parts_mut(ss_32_out, KEM_SS_BYTES));
+                WILIS_ERR_INVALID_ARG
+            }
+        }
     })
 }
 

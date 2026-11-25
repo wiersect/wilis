@@ -129,7 +129,7 @@ impl Poly {
             for bit_idx in 0..8 {
                 let bit = ((byte >> bit_idx) & 1) as u16;
                 // Constant-time selection: 0 -> 0, 1 -> 3840
-                let mask = 0u16.wrapping_sub(bit);
+                let mask = core::hint::black_box(0u16.wrapping_sub(bit));
                 out.coeffs[byte_idx * 8 + bit_idx] = half_q & mask;
             }
         }
@@ -216,7 +216,10 @@ impl Poly {
             let c = &self.coeffs[g * 8..(g + 1) * 8];
             let mut bits: u128 = 0;
             for (k, &val) in c.iter().enumerate() {
-                debug_assert!(val < KEM_Q);
+                assert!(
+                    val < KEM_Q,
+                    "Poly::pack coefficient {val} out of canonical range 0..{KEM_Q}"
+                );
                 bits |= (val as u128) << (k * 13);
             }
             let raw = bits.to_le_bytes();

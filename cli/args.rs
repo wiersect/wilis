@@ -1,5 +1,6 @@
-//! Command-line argument parser and help text definitions for Wilis v0.4.6.
+//! Command-line argument parser and help text definitions for Wilis v0.4.7.
 
+use std::fmt;
 use std::path::Path;
 
 use crate::core::constants::{HASH_BYTES, KEY_BYTES};
@@ -10,8 +11,8 @@ use crate::utils::hex::decode_hex;
 use crate::utils::prompt::{hash_keyfile, read_hidden_passphrase};
 use crate::utils::zeroize::{paths_refer_to_same_file, zeroize_bytes, SecretKey};
 
-/// Authentication credential supplied on the command line (auto-zeroizes passphrase on drop).
-#[derive(Debug)]
+/// Authentication credential supplied on the command line (auto-zeroizes passphrase on drop
+/// and redacts secret material in `Debug` output).
 pub enum AuthInput {
     Passphrase {
         passphrase: String,
@@ -19,6 +20,31 @@ pub enum AuthInput {
         strength: KdfStrength,
     },
     RawKey(SecretKey),
+}
+
+impl fmt::Debug for AuthInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AuthInput::Passphrase {
+                keyfile_hash,
+                strength,
+                ..
+            } => f
+                .debug_struct("Passphrase")
+                .field("passphrase", &"[REDACTED]")
+                .field(
+                    "keyfile_hash",
+                    &if keyfile_hash.is_some() {
+                        "Some([REDACTED])"
+                    } else {
+                        "None"
+                    },
+                )
+                .field("strength", strength)
+                .finish(),
+            AuthInput::RawKey(k) => f.debug_tuple("RawKey").field(k).finish(),
+        }
+    }
 }
 
 impl Drop for AuthInput {
@@ -39,14 +65,29 @@ impl Drop for AuthInput {
     }
 }
 
-/// Vault sub-actions (auto-zeroizes secret values on drop).
-#[derive(Debug)]
+/// Vault sub-actions (auto-zeroizes secret values on drop and redacts them in `Debug` output).
 pub enum VaultAction {
     Init,
     Set { name: String, value: String },
     Get { name: String },
     List,
     Delete { name: String },
+}
+
+impl fmt::Debug for VaultAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VaultAction::Init => f.write_str("Init"),
+            VaultAction::Set { name, .. } => f
+                .debug_struct("Set")
+                .field("name", name)
+                .field("value", &"[REDACTED]")
+                .finish(),
+            VaultAction::Get { name } => f.debug_struct("Get").field("name", name).finish(),
+            VaultAction::List => f.write_str("List"),
+            VaultAction::Delete { name } => f.debug_struct("Delete").field("name", name).finish(),
+        }
+    }
 }
 
 impl Drop for VaultAction {
@@ -78,8 +119,7 @@ fn zeroize_string(s: &mut String) {
     zeroize_bytes(unsafe { s.as_bytes_mut() });
 }
 
-/// Parsed CLI subcommands.
-#[derive(Debug)]
+/// Parsed CLI subcommands (redacts secret payloads in `Debug` output).
 pub enum Command {
     Help,
     EncryptText {
@@ -135,6 +175,7 @@ pub enum Command {
         vault_path: String,
         auth: AuthInput,
         action: VaultAction,
+        explicit_strength: Option<KdfStrength>,
     },
     SignKeygen {
         out_prefix: String,
@@ -181,6 +222,115 @@ pub enum Command {
     },
     Bench,
     Audit,
+}
+
+impl fmt::Debug for Command {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Command::Help => f.write_str("Help"),
+            Command::EncryptText { auth, aad, .. } => f
+                .debug_struct("EncryptText")
+                .field("auth", auth)
+                .field("aad", aad)
+                .field("plaintext", &"[REDACTED]")
+                .finish(),
+            Command::DecryptText { auth, aad, .. } => f
+                .debug_struct("DecryptText")
+                .field("auth", auth)
+                .field("aad", aad)
+                .finish(),
+            Command::EncryptFile { auth, input_path, output_path, .. } => f
+                .debug_struct("EncryptFile")
+                .field("auth", auth)
+                .field("input_path", input_path)
+                .field("output_path", output_path)
+                .finish(),
+            Command::DecryptFile { auth, input_path, output_path, .. } => f
+                .debug_struct("DecryptFile")
+                .field("auth", auth)
+                .field("input_path", input_path)
+                .field("output_path", output_path)
+                .finish(),
+            Command::EncryptDir { auth, dir_path, output_file, .. } => f
+                .debug_struct("EncryptDir")
+                .field("auth", auth)
+                .field("dir_path", dir_path)
+                .field("output_file", output_file)
+                .finish(),
+            Command::DecryptDir { auth, input_file, out_dir, .. } => f
+                .debug_struct("DecryptDir")
+                .field("auth", auth)
+                .field("input_file", input_file)
+                .field("out_dir", out_dir)
+                .finish(),
+            Command::KemKeygen { out_prefix } => f
+                .debug_struct("KemKeygen")
+                .field("out_prefix", out_prefix)
+                .finish(),
+            Command::PubEncrypt { pk_path, input_path, output_path, .. } => f
+                .debug_struct("PubEncrypt")
+                .field("pk_path", pk_path)
+                .field("input_path", input_path)
+                .field("output_path", output_path)
+                .finish(),
+            Command::PubDecrypt { sk_path, input_path, output_path, .. } => f
+                .debug_struct("PubDecrypt")
+                .field("sk_path", sk_path)
+                .field("input_path", input_path)
+                .field("output_path", output_path)
+                .finish(),
+            Command::Vault { vault_path, auth, action, explicit_strength } => f
+                .debug_struct("Vault")
+                .field("vault_path", vault_path)
+                .field("auth", auth)
+                .field("action", action)
+                .field("explicit_strength", explicit_strength)
+                .finish(),
+            Command::SignKeygen { out_prefix, height } => f
+                .debug_struct("SignKeygen")
+                .field("out_prefix", out_prefix)
+                .field("height", height)
+                .finish(),
+            Command::SignFile { sk_path, input_path, sig_out_path } => f
+                .debug_struct("SignFile")
+                .field("sk_path", sk_path)
+                .field("input_path", input_path)
+                .field("sig_out_path", sig_out_path)
+                .finish(),
+            Command::VerifyFile { pk_path, input_path, sig_path } => f
+                .debug_struct("VerifyFile")
+                .field("pk_path", pk_path)
+                .field("input_path", input_path)
+                .field("sig_path", sig_path)
+                .finish(),
+            Command::SplitKey { total, threshold, .. } => f
+                .debug_struct("SplitKey")
+                .field("secret_hex", &"[REDACTED]")
+                .field("total", total)
+                .field("threshold", threshold)
+                .finish(),
+            Command::CombineKey { shares } => f
+                .debug_struct("CombineKey")
+                .field("shares_count", &shares.len())
+                .finish(),
+            Command::Mac { key, file_path, .. } => f
+                .debug_struct("Mac")
+                .field("key", key)
+                .field("file_path", file_path)
+                .finish(),
+            Command::MacVerify { key, file_path, .. } => f
+                .debug_struct("MacVerify")
+                .field("key", key)
+                .field("file_path", file_path)
+                .finish(),
+            Command::Rand { bytes } => f.debug_struct("Rand").field("bytes", bytes).finish(),
+            Command::Keygen => f.write_str("Keygen"),
+            Command::HashText { .. } => f.write_str("HashText"),
+            Command::HashFile { path } => f.debug_struct("HashFile").field("path", path).finish(),
+            Command::Bench => f.write_str("Bench"),
+            Command::Audit => f.write_str("Audit"),
+        }
+    }
 }
 
 /// Returns formatted CLI usage documentation.
@@ -811,6 +961,7 @@ fn parse_vault_cmd(args: &[String]) -> Result<Command> {
         vault_path,
         auth,
         action,
+        explicit_strength: strength,
     })
 }
 

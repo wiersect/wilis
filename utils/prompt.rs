@@ -77,9 +77,13 @@ impl EchoGuard {
 
         // SAFETY: Standard Win32 console handle queries on process stdin.
         unsafe {
+            let invalid_handle = (-1isize) as *mut core::ffi::c_void;
             let handle = GetStdHandle(STD_INPUT_HANDLE);
             let mut mode: u32 = 0;
-            if !handle.is_null() && GetConsoleMode(handle, &mut mode) != 0 {
+            if !handle.is_null()
+                && handle != invalid_handle
+                && GetConsoleMode(handle, &mut mode) != 0
+            {
                 let ok = SetConsoleMode(handle, mode & !ENABLE_ECHO_INPUT) != 0;
                 return Self {
                     handle,
@@ -165,9 +169,14 @@ fn prompt_once(prompt: &str) -> Result<String> {
     Ok(line)
 }
 
-/// Streams a keyfile through `WilisHash-256` to produce a 256-bit 2FA keyfile digest.
+/// Streams a regular keyfile through `WilisHash-256` to produce a 256-bit 2FA keyfile digest.
 pub fn hash_keyfile(path: &str) -> Result<[u8; HASH_BYTES]> {
     let mut file = File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(WilisError::InvalidKey(format!(
+            "keyfile '{path}' must be a regular file (not a directory, pipe, or device)"
+        )));
+    }
     let mut hasher = WilisHash::new();
     let mut buf = [0u8; 64 * 1024];
 

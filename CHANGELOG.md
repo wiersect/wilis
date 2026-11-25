@@ -2,6 +2,16 @@
 
 All notable changes to **Wilis** are documented in this file.
 
+## [0.4.7] - 2026-11-25
+
+### Bug Fixes & Deep Security Audit (Round 7)
+- **Eliminated C-FFI Aliasing UB on KEM Error Paths (`ffi/c_api.rs`)**: Scoped immutable input slice borrows (`pk`, `sk`, `ct`) inside blocks that strictly end before any mutable output buffer (`ct_out`, `ss_32_out`) is zeroized or written in `wilis_kem_encapsulate` and `wilis_kem_decapsulate`, preventing Stacked/Tree Borrows aliasing UB under in-place error calls.
+- **Fixed Silent KDF Strength Downgrade in `WilisVault` CLI (`vault/store.rs`, `cli/vault_cmd.rs`, `cli/args.rs`, `cli/mod.rs`)**: Added `Vault::load_encrypted_with_params` and tracked explicit `--strength` overrides so `vault set` and `vault del` preserve the vault's original `KdfParams` (preventing silent downgrade of `high`/`paranoid` vaults back to `interactive`); rejected duplicate secret keys in `Vault::from_bytes`.
+- **Eliminated Debug/Release Divergence in `GF(2^8)` & `Poly::pack` (`split/gf256.rs`, `split/shamir.rs`, `kem/poly.rs`)**: Added panic-free `gf_checked_div(a, b) -> Option<u8>` (used in `combine_shares`), upgraded `gf_div(a, 0)` and `Poly::pack` (`coeff >= Q`) from `debug_assert!` to consistent `assert!` so release builds never silently return `0` or corrupt adjacent packed 13-bit coefficients; wrapped `Poly::from_msg_bits` mask in `core::hint::black_box`.
+- **Atomic Symlink-Safe `WilisDir` Extraction & `EINTR` Retry (`archive/unpack.rs`)**: Switched `unpack_directory` file extraction to CSPRNG-named `O_EXCL` sibling temp files (`mode 0600`) + `sync_all()` + re-verified symlink check + atomic `fs::rename`, closing the open/truncate symlink TOCTOU window and preventing partial files on mid-stream failure; added `EINTR` retry on trailing-byte check.
+- **Accurate Streaming OS I/O Error Propagation (`stream/decrypt_stream.rs`)**: Distinguished `io::ErrorKind::UnexpectedEof` (`AuthenticationFailed`) from genuine OS/disk errors (`WilisError::Io`) when reading chunk ciphertexts and tags.
+- **Secret `Debug` Redaction, Keygen Atomicity, Leaf-Burn & Device-Hang Protection (`cli/args.rs`, `cli/file_cmd.rs`, `cli/kem_cmd.rs`, `cli/sign_cmd.rs`, `utils/prompt.rs`, `mac/`, `xof/`, `hash/`, `bindings/python/wilis_py.py`)**: Implemented redacted `fmt::Debug` for `AuthInput`, `VaultAction`, and `Command`; wrote `.wks` before `.wkp` in `kem-keygen` with cleanup on partial failure (preventing orphaned public keys); rejected existing directory `--out` up front across `encrypt-file`/`decrypt-file`/`pub-encrypt`/`pub-decrypt`/`sign` (preventing `sign` from burning a one-time WOTS+ leaf on an invalid output dir); rejected non-regular files (such as `/dev/zero`, pipes, directories) in `hash_keyfile`; checked Windows `INVALID_HANDLE_VALUE` in `EchoGuard`; eliminated unwiped 16-byte stack block copies in `WilisMac`/`WilisXof`/`WilisHash`; hardened Python `mac_verify` key-length check & KEM corruption self-test; added `regression_v047_audit_fixes_verified` (**42 / 42 tests**).
+
 ## [0.4.6] - 2026-11-25
 
 ### Bug Fixes & Deep Red-Team Security Audit (Round 6)

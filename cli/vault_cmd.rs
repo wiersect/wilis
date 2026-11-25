@@ -21,7 +21,16 @@ fn extract_pass_auth(auth: &AuthInput) -> Result<(&[u8], Option<&[u8; 32]>, KdfS
 }
 
 /// Executes a `vault` subcommand against an encrypted `.wils` vault file.
-pub fn run_vault(vault_path: &str, auth: AuthInput, action: VaultAction) -> Result<()> {
+///
+/// On `set` and `del`, preserves the vault's existing KDF parameters unless
+/// `explicit_strength` was passed on the command line (preventing silent downgrade
+/// of `high`/`paranoid` vaults to `interactive`).
+pub fn run_vault(
+    vault_path: &str,
+    auth: AuthInput,
+    action: VaultAction,
+    explicit_strength: Option<KdfStrength>,
+) -> Result<()> {
     let (pass, keyfile_hash, strength) = extract_pass_auth(&auth)?;
     let path = Path::new(vault_path);
 
@@ -34,14 +43,19 @@ pub fn run_vault(vault_path: &str, auth: AuthInput, action: VaultAction) -> Resu
                 )));
             }
             let vault = Vault::new();
-            vault.save_encrypted(path, pass, keyfile_hash, strength.to_params())?;
+            let params = explicit_strength.unwrap_or(strength).to_params();
+            vault.save_encrypted(path, pass, keyfile_hash, params)?;
             println!("Initialized encrypted WilisVault at '{vault_path}'");
             Ok(())
         }
         VaultAction::Set { name, value } => {
-            let mut vault = Vault::load_encrypted(path, pass, keyfile_hash)?;
+            let (mut vault, loaded_params) =
+                Vault::load_encrypted_with_params(path, pass, keyfile_hash)?;
             vault.set(name.as_str(), value.as_str())?;
-            vault.save_encrypted(path, pass, keyfile_hash, strength.to_params())?;
+            let save_params = explicit_strength
+                .map(|s| s.to_params())
+                .unwrap_or(loaded_params);
+            vault.save_encrypted(path, pass, keyfile_hash, save_params)?;
             println!(
                 "Saved secret '{name}' in '{vault_path}' ({} total entries)",
                 vault.len()
@@ -72,13 +86,17 @@ pub fn run_vault(vault_path: &str, auth: AuthInput, action: VaultAction) -> Resu
             Ok(())
         }
         VaultAction::Delete { name } => {
-            let mut vault = Vault::load_encrypted(path, pass, keyfile_hash)?;
+            let (mut vault, loaded_params) =
+                Vault::load_encrypted_with_params(path, pass, keyfile_hash)?;
             if !vault.delete(name) {
                 return Err(WilisError::InvalidFormat(format!(
                     "secret '{name}' not found in vault"
                 )));
             }
-            vault.save_encrypted(path, pass, keyfile_hash, strength.to_params())?;
+            let save_params = explicit_strength
+                .map(|s| s.to_params())
+                .unwrap_or(loaded_params);
+            vault.save_encrypted(path, pass, keyfile_hash, save_params)?;
             println!("Deleted secret '{name}' from '{vault_path}'");
             Ok(())
         }

@@ -1,4 +1,4 @@
-//! Zero-dependency command-line interface for Wilis v0.4.6.
+//! Zero-dependency command-line interface for Wilis v0.4.7.
 
 pub mod args;
 pub mod audit_cmd;
@@ -80,7 +80,8 @@ pub fn run(raw_args: &[String]) -> Result<()> {
             vault_path,
             auth,
             action,
-        } => vault_cmd::run_vault(&vault_path, auth, action),
+            explicit_strength,
+        } => vault_cmd::run_vault(&vault_path, auth, action, explicit_strength),
         Command::SignKeygen { out_prefix, height } => sign_cmd::run_sign_keygen(&out_prefix, height),
         Command::SignFile {
             sk_path,

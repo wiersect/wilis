@@ -7,4 +7,5 @@
 pub mod gf256;
 pub mod shamir;
 
+pub use gf256::gf_checked_div;
 pub use shamir::{combine_shares, split_secret, Share};

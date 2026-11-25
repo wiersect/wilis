@@ -3,7 +3,7 @@
 
 use crate::error::{Result, WilisError};
 use crate::hash::hash;
-use crate::split::gf256::{gf_add, gf_div, gf_mul};
+use crate::split::gf256::{gf_add, gf_checked_div, gf_mul};
 use crate::utils::base64::{decode_base64, encode_base64};
 use crate::utils::constant_time::ct_eq;
 use crate::utils::random::fill_random;
@@ -221,7 +221,7 @@ pub fn combine_shares(shares: &[Share]) -> Result<Vec<u8>> {
     let k = subset.len();
 
     // Helper: evaluate Lagrange interpolation of `subset` at any point `x_eval` in GF(2^8)
-    let eval_at = |x_eval: u8, out: &mut [u8]| {
+    let eval_at = |x_eval: u8, out: &mut [u8]| -> Result<()> {
         let mut weights = vec![0u8; k];
         for i in 0..k {
             let xi = subset[i].index;
@@ -235,7 +235,9 @@ pub fn combine_shares(shares: &[Share]) -> Result<Vec<u8>> {
                 num = gf_mul(num, gf_add(x_eval, xj));
                 den = gf_mul(den, gf_add(xi, xj));
             }
-            weights[i] = gf_div(num, den);
+            weights[i] = gf_checked_div(num, den).ok_or_else(|| {
+                WilisError::InvalidFormat("degenerate zero denominator in Lagrange interpolation".into())
+            })?;
         }
         for byte_pos in 0..secret_len {
             let mut val = 0u8;
@@ -244,10 +246,14 @@ pub fn combine_shares(shares: &[Share]) -> Result<Vec<u8>> {
             }
             out[byte_pos] = val;
         }
+        Ok(())
     };
 
     let mut recovered = vec![0u8; secret_len];
-    eval_at(0, &mut recovered);
+    if let Err(e) = eval_at(0, &mut recovered) {
+        zeroize_bytes(&mut recovered);
+        return Err(e);
+    }
 
     // Verify reconstructed secret against the embedded WilisHash-256 commitment
     let actual_cmt = secret_commitment(&recovered);
@@ -261,7 +267,11 @@ pub fn combine_shares(shares: &[Share]) -> Result<Vec<u8>> {
     if shares.len() > k {
         let mut expected_y = vec![0u8; secret_len];
         for extra in &shares[k..] {
-            eval_at(extra.index, &mut expected_y);
+            if let Err(e) = eval_at(extra.index, &mut expected_y) {
+                zeroize_bytes(&mut expected_y);
+                zeroize_bytes(&mut recovered);
+                return Err(e);
+            }
             if !ct_eq(&expected_y, &extra.data) {
                 zeroize_bytes(&mut expected_y);
                 zeroize_bytes(&mut recovered);

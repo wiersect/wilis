@@ -121,13 +121,21 @@ fn decrypt_stream_core<R: Read, W: Write>(
         }
 
         ct_buf.resize(ct_len as usize, 0);
-        if reader.read_exact(&mut ct_buf).is_err() {
-            return Err(WilisError::AuthenticationFailed);
+        if let Err(e) = reader.read_exact(&mut ct_buf) {
+            return Err(if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                WilisError::AuthenticationFailed
+            } else {
+                WilisError::Io(e)
+            });
         }
 
         let mut tag = [0u8; TAG_BYTES];
-        if reader.read_exact(&mut tag).is_err() {
-            return Err(WilisError::AuthenticationFailed);
+        if let Err(e) = reader.read_exact(&mut tag) {
+            return Err(if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                WilisError::AuthenticationFailed
+            } else {
+                WilisError::Io(e)
+            });
         }
 
         let chunk_nonce = derive_chunk_nonce(&header.nonce, chunk_index, is_final);

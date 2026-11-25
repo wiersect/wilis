@@ -40,8 +40,8 @@ impl WilisHash {
             data = &data[take..];
 
             if self.buf_len == RATE_BYTES {
-                let block = self.buffer;
-                self.state.xor_rate_block(&block);
+                self.state.xor_rate_block(&self.buffer);
+                zeroize_bytes(&mut self.buffer);
                 permute(&mut self.state, ROUNDS_DATA);
                 self.buf_len = 0;
             }

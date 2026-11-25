@@ -1,5 +1,5 @@
 """
-Zero-dependency Python 3 binding for the Wilis v0.4.6 Cryptography Suite (`libwilis`).
+Zero-dependency Python 3 binding for the Wilis v0.4.7 Cryptography Suite (`libwilis`).
 
 Build the shared library first with:
     cargo build --release
@@ -130,6 +130,8 @@ class Wilis:
 
     def mac_verify(self, key: bytes, message: bytes, expected_tag: bytes) -> bool:
         """Verifies a 256-bit WilisMAC tag in constant time."""
+        if len(key) != 32:
+            raise ValueError("key must be exactly 32 bytes")
         if len(expected_tag) != 32:
             return False
         actual = self.mac_256(key, message)
@@ -314,7 +316,7 @@ if __name__ == "__main__":
     # 1. AEAD (including empty plaintext/AAD) + MAC + XOF + KDF bounds
     key = w.random_bytes(32)
     nonce = w.random_bytes(24)
-    msg = b"\x00Hello from Wilis v0.4.6 Python C-FFI!\x00"
+    msg = b"\x00Hello from Wilis v0.4.7 Python C-FFI!\x00"
     ct, tag = w.aead_seal(key, nonce, b"py-aad", msg)
     assert w.aead_open(key, nonce, b"py-aad", ct, tag) == msg
     e_ct, e_tag = w.aead_seal(key, nonce, b"", b"")
@@ -331,10 +333,17 @@ if __name__ == "__main__":
         except ValueError:
             pass
 
-    # 2. Post-Quantum WilisKEM
+    # 2. Post-Quantum WilisKEM (including corrupted secret-key LWE rejection)
     pk, sk = w.kem_keygen()
     kem_ct, ss1 = w.kem_encapsulate(pk)
     ss2 = w.kem_decapsulate(sk, kem_ct)
     assert ss1 == ss2
+    bad_sk = bytearray(sk)
+    bad_sk[10] ^= 0x01
+    try:
+        w.kem_decapsulate(bytes(bad_sk), kem_ct)
+        raise AssertionError("expected WilisError for corrupted KEM secret key")
+    except WilisError:
+        pass
 
-    print("Python C-FFI v0.4.6 (AEAD + MAC + XOF + KDF + Post-Quantum KEM): PASS")
+    print("Python C-FFI v0.4.7 (AEAD + MAC + XOF + KDF + Post-Quantum KEM): PASS")

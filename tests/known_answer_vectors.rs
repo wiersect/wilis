@@ -502,3 +502,240 @@ fn regression_v046_audit_fixes_verified() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn regression_v047_audit_fixes_verified() {
+    use std::io::{self, Read};
+    use wilis::cli::args::{AuthInput, VaultAction};
+    use wilis::cli::{file_cmd, sign_cmd, vault_cmd};
+    use wilis::error::WilisError;
+    use wilis::ffi::c_api::{
+        wilis_kem_decapsulate, wilis_kem_encapsulate, WILIS_ERR_INVALID_ARG,
+    };
+    use wilis::kdf::KdfStrength;
+    use wilis::kem::poly::{Poly, KEM_Q};
+    use wilis::kem::{KEM_CT_BYTES, KEM_PK_BYTES, KEM_SK_BYTES, KEM_SS_BYTES};
+    use wilis::sign::SigningKey;
+    use wilis::split::gf256::{gf_checked_div, gf_div};
+    use wilis::stream::{decrypt_stream_with_key, encrypt_stream_with_key, DEFAULT_CHUNK_SIZE};
+    use wilis::utils::prompt::hash_keyfile;
+    use wilis::utils::zeroize::SecretKey;
+    use wilis::vault::Vault;
+
+    // 1. gf_checked_div is panic-free & gf_div(a, 0) consistently panics
+    assert_eq!(gf_checked_div(42, 0), None);
+    assert_eq!(gf_checked_div(42, 42), Some(1));
+    assert!(std::panic::catch_unwind(|| gf_div(42, 0)).is_err());
+
+    // 2. Poly::pack consistently panics on non-canonical coefficients >= KEM_Q
+    let mut bad_poly = Poly::zero();
+    bad_poly.coeffs[0] = KEM_Q;
+    assert!(std::panic::catch_unwind(|| bad_poly.pack()).is_err());
+
+    // 3. Vault::from_bytes rejects duplicate secret keys
+    let mut dup_vault = Vec::new();
+    dup_vault.extend_from_slice(b"WVLT");
+    dup_vault.push(1u8);
+    dup_vault.extend_from_slice(&2u32.to_le_bytes());
+    for val in [b"v1".as_slice(), b"v2".as_slice()] {
+        dup_vault.extend_from_slice(&3u32.to_le_bytes());
+        dup_vault.extend_from_slice(b"dup");
+        dup_vault.extend_from_slice(&(val.len() as u32).to_le_bytes());
+        dup_vault.extend_from_slice(val);
+    }
+    assert!(Vault::from_bytes(&dup_vault).is_err());
+
+    // 4. Redacted Debug formatting never exposes passphrases, vault values, or split secrets
+    let auth_dbg = format!(
+        "{:?}",
+        AuthInput::Passphrase {
+            passphrase: "TOP-SECRET-PASS-999".into(),
+            keyfile_hash: Some([0x77; 32]),
+            strength: KdfStrength::Paranoid,
+        }
+    );
+    assert!(!auth_dbg.contains("TOP-SECRET-PASS-999"));
+    assert!(auth_dbg.contains("[REDACTED]"));
+
+    let va_dbg = format!(
+        "{:?}",
+        VaultAction::Set {
+            name: "api".into(),
+            value: "SUPER-SECRET-TOKEN".into(),
+        }
+    );
+    assert!(!va_dbg.contains("SUPER-SECRET-TOKEN"));
+    assert!(va_dbg.contains("[REDACTED]"));
+
+    let cmd_dbg = format!(
+        "{:?}",
+        parse_args(&[
+            "encrypt-text".to_string(),
+            "--pass".to_string(),
+            "PASS-ABC".to_string(),
+            "PLAINTEXT-XYZ".to_string(),
+        ])
+        .unwrap()
+    );
+    assert!(!cmd_dbg.contains("PASS-ABC"));
+    assert!(!cmd_dbg.contains("PLAINTEXT-XYZ"));
+
+    // 5. Vault CLI preserves existing KdfParams on `set` and `del` (no silent strength downgrade!)
+    let base = std::env::temp_dir().join(format!("wilis_v047_reg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+
+    let vpath = base.join("custom_kdf.wils");
+    let custom_params = KdfParams {
+        memory_blocks: 96,
+        passes: 3,
+    };
+    Vault::new()
+        .save_encrypted(&vpath, b"pw", None, custom_params)
+        .unwrap();
+    vault_cmd::run_vault(
+        vpath.to_str().unwrap(),
+        AuthInput::Passphrase {
+            passphrase: "pw".into(),
+            keyfile_hash: None,
+            strength: KdfStrength::Interactive,
+        },
+        VaultAction::Set {
+            name: "k1".into(),
+            value: "v1".into(),
+        },
+        None,
+    )
+    .unwrap();
+    let (loaded_v, preserved_params) =
+        Vault::load_encrypted_with_params(&vpath, b"pw", None).unwrap();
+    assert_eq!(loaded_v.get("k1"), Some("v1"));
+    assert_eq!(
+        preserved_params, custom_params,
+        "vault set without explicit --strength must preserve original KDF parameters"
+    );
+    vault_cmd::run_vault(
+        vpath.to_str().unwrap(),
+        AuthInput::Passphrase {
+            passphrase: "pw".into(),
+            keyfile_hash: None,
+            strength: KdfStrength::Interactive,
+        },
+        VaultAction::Delete { name: "k1".into() },
+        None,
+    )
+    .unwrap();
+    let (_, preserved_after_del) =
+        Vault::load_encrypted_with_params(&vpath, b"pw", None).unwrap();
+    assert_eq!(
+        preserved_after_del, custom_params,
+        "vault del without explicit --strength must preserve original KDF parameters"
+    );
+
+    // 6. decrypt_stream_with_key preserves real OS I/O errors instead of masking as AuthenticationFailed
+    struct FailingReader {
+        data: Vec<u8>,
+        pos: usize,
+        fail_at: usize,
+    }
+    impl Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos >= self.fail_at {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "simulated disk EIO"));
+            }
+            let avail = (self.fail_at - self.pos).min(buf.len()).min(self.data.len() - self.pos);
+            buf[..avail].copy_from_slice(&self.data[self.pos..self.pos + avail]);
+            self.pos += avail;
+            Ok(avail)
+        }
+    }
+    let key = [0x33u8; 32];
+    let mut enc_stream = Vec::new();
+    encrypt_stream_with_key(
+        &key,
+        &mut io::Cursor::new(b"hello streaming io error test"),
+        &mut enc_stream,
+        b"",
+        DEFAULT_CHUNK_SIZE,
+    )
+    .unwrap();
+    let mut bad_reader = FailingReader {
+        fail_at: enc_stream.len() - 10, // fail inside tag read
+        data: enc_stream,
+        pos: 0,
+    };
+    let mut sink = Vec::new();
+    let stream_err = decrypt_stream_with_key(&key, &mut bad_reader, &mut sink, b"").unwrap_err();
+    assert!(
+        matches!(stream_err, WilisError::Io(_)),
+        "expected WilisError::Io on reader failure, got {stream_err:?}"
+    );
+
+    // 7. C-FFI alias-safe in-place error handling on KEM encapsulate & decapsulate
+    unsafe {
+        let mut buf = vec![0xFFu8; KEM_SK_BYTES.max(KEM_CT_BYTES + KEM_SS_BYTES)];
+        let (ct_part, ss_part) = buf.split_at_mut(KEM_CT_BYTES);
+        // Pass pk aliasing ct_part on invalid pk -> must cleanly return INVALID_ARG & zeroize outputs
+        assert_eq!(
+            wilis_kem_encapsulate(
+                ct_part.as_ptr(),
+                ct_part.as_mut_ptr(),
+                ss_part.as_mut_ptr(),
+            ),
+            WILIS_ERR_INVALID_ARG
+        );
+        assert!(ct_part.iter().all(|&b| b == 0));
+        assert!(ss_part[..KEM_SS_BYTES].iter().all(|&b| b == 0));
+
+        // Pass ss_32_out aliasing sk on invalid sk -> must cleanly return INVALID_ARG & zeroize ss
+        buf.fill(0xEE);
+        let dummy_ct = vec![0xDDu8; KEM_CT_BYTES];
+        assert_eq!(
+            wilis_kem_decapsulate(buf.as_ptr(), dummy_ct.as_ptr(), buf.as_mut_ptr()),
+            WILIS_ERR_INVALID_ARG
+        );
+        assert!(buf[..KEM_SS_BYTES].iter().all(|&b| b == 0));
+        let _ = KEM_PK_BYTES;
+    }
+
+    // 8. hash_keyfile rejects directories (and non-regular devices like /dev/zero on Unix)
+    assert!(hash_keyfile(base.to_str().unwrap()).is_err());
+    #[cfg(unix)]
+    {
+        if std::path::Path::new("/dev/zero").exists() {
+            assert!(hash_keyfile("/dev/zero").is_err());
+        }
+    }
+
+    // 9. sign_cmd refuses existing directory `--out` WITHOUT burning a one-time WOTS+ leaf!
+    let pfx = base.join("signer");
+    sign_cmd::run_sign_keygen(pfx.to_str().unwrap(), 2).unwrap();
+    let sk_file = base.join("signer.wsk");
+    let msg_file = base.join("doc.txt");
+    std::fs::write(&msg_file, b"important contract").unwrap();
+    let out_dir = base.join("existing_dir_target");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    assert!(sign_cmd::run_sign_file(
+        sk_file.to_str().unwrap(),
+        msg_file.to_str().unwrap(),
+        out_dir.to_str().unwrap(),
+    )
+    .is_err());
+    let sk_after = SigningKey::from_bytes(&std::fs::read(&sk_file).unwrap()).unwrap();
+    assert_eq!(
+        sk_after.remaining_signatures(),
+        4,
+        "failed sign onto existing directory must NOT burn a one-time WOTS+ leaf"
+    );
+
+    // 10. file_cmd refuses existing directory `--out` up front
+    assert!(file_cmd::run_encrypt(
+        AuthInput::RawKey(SecretKey::from_bytes([0x11; 32])),
+        "",
+        msg_file.to_str().unwrap(),
+        out_dir.to_str().unwrap(),
+    )
+    .is_err());
+
+    let _ = std::fs::remove_dir_all(&base);
+}

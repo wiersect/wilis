@@ -75,7 +75,7 @@ flowchart TD
 | **Related-Key Sensitivity** (256 flips) | **`50.07%`** ciphertext · **`49.89%`** tag diffusion | `[47.5% .. 52.5%]` | **PASS** |
 | **`WilisKEM` IND-CCA2 Self-Audit** | Zero decapsulation errors + FO implicit rejection | Exact match & tamper reject | **PASS** |
 | **Adversarial Parser Fuzz Audit** | 300+ malformed/truncated/overflow payloads across all 16 parsers | **Zero panics** | **PASS** |
-| **Cross-Platform CI & Test Suite** | **`41 / 41` tests passing** (Linux, macOS, Windows + KAT) | `-D warnings`, 0 external crates | **PASS** |
+| **Cross-Platform CI & Test Suite** | **`42 / 42` tests passing** (Linux, macOS, Windows + KAT) | `-D warnings`, 0 external crates | **PASS** |
 
 ---
 
@@ -85,7 +85,7 @@ flowchart TD
 git clone https://github.com/wiersect/wilis.git
 cd wilis
 
-# Run all 41 tests (including locked KAT vectors, post-quantum KEM, WOTS+, ratchet, Shamir, vault, FFI & fuzz)
+# Run all 42 tests (including locked KAT vectors, post-quantum KEM, WOTS+, ratchet, Shamir, vault, FFI & fuzz)
 cargo test
 
 # Build optimized CLI binary + native shared library (libwilis.so / .dylib / .dll)

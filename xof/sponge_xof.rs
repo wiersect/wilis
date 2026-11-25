@@ -53,8 +53,8 @@ impl WilisXof {
             data = &data[take..];
 
             if self.buf_pos == RATE_BYTES {
-                let block = self.buf;
-                self.state.xor_rate_block(&block);
+                self.state.xor_rate_block(&self.buf);
+                zeroize_bytes(&mut self.buf);
                 permute(&mut self.state, ROUNDS_DATA);
                 self.buf_pos = 0;
             }

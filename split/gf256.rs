@@ -41,9 +41,22 @@ pub fn gf_inv(a: u8) -> u8 {
     result
 }
 
-/// Division `a / b` in `GF(2^8)`. Caller must ensure `b != 0`.
+/// Checked division `a / b` in `GF(2^8)`. Returns `None` if `b == 0` (panic-free in both debug and release).
+#[inline]
+pub fn gf_checked_div(a: u8, b: u8) -> Option<u8> {
+    if b == 0 {
+        None
+    } else {
+        Some(gf_mul(a, gf_inv(b)))
+    }
+}
+
+/// Division `a / b` in `GF(2^8)`.
+///
+/// # Panics
+/// Panics if `b == 0` (consistently in both debug and release builds).
 #[inline]
 pub fn gf_div(a: u8, b: u8) -> u8 {
-    debug_assert!(b != 0, "division by zero in GF(2^8)");
+    assert!(b != 0, "division by zero in GF(2^8)");
     gf_mul(a, gf_inv(b))
 }

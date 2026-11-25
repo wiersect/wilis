@@ -32,10 +32,14 @@ pub fn run_kem_keygen(out_prefix: &str) -> Result<()> {
 
     let pk_bytes = pk.to_bytes();
     let mut sk_bytes = sk.to_bytes();
-    write_atomic_file(Path::new(&pk_path), &pk_bytes, false)?;
+    // Write secret key FIRST so a failed secret write can never leave an orphaned public key
     let write_sk = write_secret_file(Path::new(&sk_path), &sk_bytes);
     zeroize_bytes(&mut sk_bytes);
     write_sk?;
+    if let Err(e) = write_atomic_file(Path::new(&pk_path), &pk_bytes, false) {
+        let _ = fs::remove_file(&sk_path);
+        return Err(e);
+    }
 
     let fingerprint = &hash_hex(&pk_bytes)[..32];
     println!("Generated Post-Quantum WilisKEM Keypair (Module-LWE 768 / q=7681 / IND-CCA2)");
@@ -57,6 +61,12 @@ pub fn run_pub_encrypt(pk_path: &str, aad: &str, input_path: &str, output_path: 
         return Err(WilisError::InvalidParameters(
             "output path must not overwrite the input file or public key".into(),
         ));
+    }
+    if out_p.is_dir() {
+        return Err(WilisError::InvalidParameters(format!(
+            "output path '{}' is an existing directory",
+            output_path
+        )));
     }
 
     let pk = KemPublicKey::from_bytes(&read_bounded_file(pk_p, KEM_PK_BYTES)?)?;
@@ -87,6 +97,12 @@ pub fn run_pub_decrypt(sk_path: &str, aad: &str, input_path: &str, output_path: 
         return Err(WilisError::InvalidParameters(
             "output path must not overwrite the input file or secret key".into(),
         ));
+    }
+    if out_p.is_dir() {
+        return Err(WilisError::InvalidParameters(format!(
+            "output path '{}' is an existing directory",
+            output_path
+        )));
     }
 
     let mut sk_bytes = read_bounded_file(sk_p, KEM_SK_BYTES)?;

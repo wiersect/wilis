@@ -46,8 +46,8 @@ impl WilisMac {
             data = &data[take..];
 
             if self.buf_len == RATE_BYTES {
-                let block = self.buf;
-                self.state.xor_rate_block(&block);
+                self.state.xor_rate_block(&self.buf);
+                zeroize_bytes(&mut self.buf);
                 permute(&mut self.state, ROUNDS_DATA);
                 self.buf_len = 0;
             }

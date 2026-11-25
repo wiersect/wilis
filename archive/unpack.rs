@@ -2,7 +2,7 @@
 //! and cross-platform path-traversal protection.
 
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, BufReader, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -10,7 +10,7 @@ use crate::archive::pack::{WDIR_MAGIC, WDIR_VERSION};
 use crate::core::constants::{HASH_BYTES, KEY_BYTES};
 use crate::error::{Result, WilisError};
 use crate::stream::{decrypt_stream_with_key, decrypt_stream_with_passphrase};
-use crate::utils::zeroize::zeroize_bytes;
+use crate::utils::zeroize::{create_unique_temp_file, zeroize_bytes};
 
 /// Returns `true` if `part` is a Windows reserved DOS device name (e.g. `CON`, `NUL.txt`, `COM1`).
 fn is_windows_reserved_name(part: &str) -> bool {
@@ -235,19 +235,9 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
                 create_secure_dir_all(parent)?;
             }
 
-            let mut opts = OpenOptions::new();
-            opts.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
-            }
-            let mut out_file = opts.open(&target_path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                out_file.set_permissions(fs::Permissions::from_mode(0o600))?;
-            }
+            // Extract atomically via CSPRNG O_EXCL sibling temp file (mode 0600 on Unix)
+            // so extraction can never follow a raced symlink or leave half-written files.
+            let (tmp_path, mut out_file) = create_unique_temp_file(&target_path, true)?;
             let write_res = (|| -> Result<()> {
                 while remaining > 0 {
                     let to_read = remaining.min(copy_buf.len() as u64) as usize;
@@ -258,19 +248,34 @@ pub fn unpack_directory<R: Read>(reader: &mut R, dest_dir: &Path) -> Result<u64>
                 out_file.sync_all()?;
                 Ok(())
             })();
+            drop(out_file);
             if let Err(e) = write_res {
-                drop(out_file);
-                let _ = fs::remove_file(&target_path);
+                let _ = fs::remove_file(&tmp_path);
                 return Err(e);
+            }
+            if let Err(e) = ensure_no_symlink_components(dest_dir, &rel_path) {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(e);
+            }
+            if let Err(e) = fs::rename(&tmp_path, &target_path) {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(e.into());
             }
         }
 
-        // Strict canonical check: reject unexpected trailing garbage bytes
+        // Strict canonical check: reject unexpected trailing garbage bytes (retrying EINTR)
         let mut trailing = [0u8; 1];
-        if reader.read(&mut trailing)? != 0 {
-            return Err(WilisError::InvalidFormat(
-                "unexpected trailing bytes after WDIR archive end".into(),
-            ));
+        loop {
+            match reader.read(&mut trailing) {
+                Ok(0) => break,
+                Ok(_) => {
+                    return Err(WilisError::InvalidFormat(
+                        "unexpected trailing bytes after WDIR archive end".into(),
+                    ));
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
         }
         Ok(())
     })();

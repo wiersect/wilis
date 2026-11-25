@@ -28,7 +28,10 @@ pub fn run_sign_keygen(out_prefix: &str, height: u8) -> Result<()> {
     write_sk?;
 
     let pk_bytes = pk.to_bytes();
-    write_atomic_file(Path::new(&pk_path), &pk_bytes, false)?;
+    if let Err(e) = write_atomic_file(Path::new(&pk_path), &pk_bytes, false) {
+        let _ = fs::remove_file(&sk_path);
+        return Err(e);
+    }
 
     let pk_id = &hash_hex(&pk_bytes)[..32];
     println!("Generated Post-Quantum WilisSign Keypair (WOTS+ Merkle Tree, height={height})");
@@ -50,6 +53,12 @@ pub fn run_sign_file(sk_path: &str, input_path: &str, sig_out_path: &str) -> Res
         return Err(WilisError::InvalidParameters(
             "signature output path must not overwrite the input file or secret key".into(),
         ));
+    }
+    if out_p.is_dir() {
+        return Err(WilisError::InvalidParameters(format!(
+            "signature output path '{}' is an existing directory",
+            sig_out_path
+        )));
     }
 
     let mut sk_bytes = read_bounded_file(sk_p, 256)?;

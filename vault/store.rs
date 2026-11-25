@@ -6,7 +6,8 @@ use std::path::Path;
 use crate::core::constants::HASH_BYTES;
 use crate::error::{Result, WilisError};
 use crate::format::{
-    decrypt_with_passphrase_and_keyfile, encrypt_with_passphrase_and_keyfile,
+    decrypt_with_passphrase_and_keyfile, encrypt_with_passphrase_and_keyfile, ContainerHeader,
+    KeyMode,
 };
 use crate::kdf::KdfParams;
 use crate::utils::zeroize::{read_bounded_file, write_secret_file, zeroize_bytes};
@@ -153,13 +154,20 @@ impl Vault {
             if vlen > MAX_VAULT_VAL_BYTES || data.len().saturating_sub(pos) < vlen {
                 return Err(WilisError::InvalidFormat("invalid or truncated vault value bytes".into()));
             }
-            let v = String::from_utf8(data[pos..pos + vlen].to_vec()).map_err(|err| {
+            let mut v = String::from_utf8(data[pos..pos + vlen].to_vec()).map_err(|err| {
                 let mut raw = err.into_bytes();
                 zeroize_bytes(&mut raw);
                 WilisError::InvalidEncoding("non-UTF-8 vault value".into())
             })?;
             pos += vlen;
 
+            if vault.entries.contains_key(&k) {
+                // SAFETY: Overwriting UTF-8 string bytes with 0x00 preserves UTF-8 validity.
+                zeroize_bytes(unsafe { v.as_bytes_mut() });
+                return Err(WilisError::InvalidFormat(format!(
+                    "duplicate secret key '{k}' rejected in vault payload"
+                )));
+            }
             vault.set(k, v)?;
         }
 
@@ -196,13 +204,23 @@ impl Vault {
         Ok(())
     }
 
-    /// Loads, authenticates, and decrypts a vault from `path`.
-    pub fn load_encrypted(
+    /// Loads, authenticates, and decrypts a vault from `path`, returning both the [`Vault`]
+    /// and the [`KdfParams`] stored in its container header so updates preserve KDF strength.
+    pub fn load_encrypted_with_params(
         path: &Path,
         passphrase: &[u8],
         keyfile_hash: Option<&[u8; HASH_BYTES]>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, KdfParams)> {
         let encrypted = read_bounded_file(path, MAX_VAULT_FILE_BYTES)?;
+        let (header, _) = ContainerHeader::parse(&encrypted)?;
+        let params = match header.mode {
+            KeyMode::Passphrase { params, .. } => params,
+            KeyMode::RawKey => {
+                return Err(WilisError::InvalidFormat(
+                    "vault container must use passphrase mode".into(),
+                ));
+            }
+        };
         let mut raw = decrypt_with_passphrase_and_keyfile(
             passphrase,
             keyfile_hash,
@@ -211,7 +229,16 @@ impl Vault {
         )?;
         let vault_res = Self::from_bytes(&raw);
         zeroize_bytes(&mut raw);
-        vault_res
+        Ok((vault_res?, params))
+    }
+
+    /// Loads, authenticates, and decrypts a vault from `path`.
+    pub fn load_encrypted(
+        path: &Path,
+        passphrase: &[u8],
+        keyfile_hash: Option<&[u8; HASH_BYTES]>,
+    ) -> Result<Self> {
+        Self::load_encrypted_with_params(path, passphrase, keyfile_hash).map(|(v, _)| v)
     }
 }
 
