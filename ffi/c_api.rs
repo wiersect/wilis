@@ -21,16 +21,21 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use crate::aead::{open, seal, siv_open, siv_seal, SIV_TAG_BYTES};
 use crate::core::constants::{HASH_BYTES, KEY_BYTES, NONCE_BYTES, SALT_BYTES, TAG_BYTES};
 use crate::hash::{hash, tree_hash};
-use crate::kdf::{derive_key, KdfParams};
+use crate::kdf::{derive_key, derive_key_parallel, KdfParams, ParallelKdfParams};
 use crate::kem::{
-    decapsulate, encapsulate, keygen, KemCiphertext, KemPublicKey, KemSecretKey, KEM_CT_BYTES,
-    KEM_PK_BYTES, KEM_SK_BYTES, KEM_SS_BYTES,
+    decapsulate, encapsulate, keygen, signcrypt, unsigncrypt, KemCiphertext, KemPublicKey,
+    KemSecretKey, KEM_CT_BYTES, KEM_PK_BYTES, KEM_SK_BYTES, KEM_SS_BYTES,
 };
 use crate::mac::{derive_subkey, mac};
+use crate::protocols::fpe::{fpe_decrypt_str, fpe_encrypt_str};
+use crate::protocols::totp::generate_totp_at;
 use crate::sign::{
     Signature, SigningKey, SlhPublicKey, SlhSecretKey, SlhSignature, VerifyingKey, SIGN_PK_BYTES,
     SIGN_SK_BYTES, SLH_PK_BYTES, SLH_SIG_BYTES, SLH_SK_BYTES,
 };
+use crate::utils::compress::{compress, decompress};
+use crate::utils::constant_time::ct_eq;
+use crate::utils::mnemonic::{decode_mnemonic, encode_mnemonic};
 use crate::utils::random::fill_random;
 use crate::utils::zeroize::zeroize_bytes;
 use crate::xof::WilisXof;
@@ -39,6 +44,7 @@ pub const WILIS_OK: i32 = 0;
 pub const WILIS_ERR_INVALID_ARG: i32 = -1;
 pub const WILIS_ERR_AUTH_FAILED: i32 = -2;
 pub const WILIS_ERR_INTERNAL: i32 = -3;
+pub const WILIS_ERR_BUF_TOO_SMALL: i32 = -4;
 
 #[inline]
 fn ffi_guard<F: FnOnce() -> i32>(f: F) -> i32 {
@@ -887,6 +893,542 @@ pub unsafe extern "C" fn wilis_slh_verify(
             WILIS_OK
         } else {
             WILIS_ERR_AUTH_FAILED
+        }
+    })
+}
+
+/// Constant-time comparison of two `len`-byte buffers.
+/// Returns `1` if equal, `0` if unequal, or `WILIS_ERR_INVALID_ARG` (`-1`) on invalid pointers.
+///
+/// # Safety
+/// - If `len > 0`, both `a` and `b` must point to at least `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_ct_eq(a: *const u8, b: *const u8, len: usize) -> i32 {
+    ffi_guard(|| {
+        let sa = match read_slice(a, len) {
+            Some(s) => s,
+            None => return WILIS_ERR_INVALID_ARG,
+        };
+        let sb = match read_slice(b, len) {
+            Some(s) => s,
+            None => return WILIS_ERR_INVALID_ARG,
+        };
+        if ct_eq(sa, sb) { 1 } else { 0 }
+    })
+}
+
+/// Volatile-wipes `buf[..len]` with zeros so optimizing compilers cannot elide secret erasure.
+///
+/// # Safety
+/// - If `len > 0`, `buf` must point to at least `len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_zeroize(buf: *mut u8, len: usize) -> i32 {
+    ffi_guard(|| {
+        if len == 0 {
+            return WILIS_OK;
+        }
+        if buf.is_null() || !valid_slice_len(len) {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        zeroize_bytes(slice::from_raw_parts_mut(buf, len));
+        WILIS_OK
+    })
+}
+
+/// Derives a 256-bit key using multi-lane parallel memory-hard `WilisKDF` v3 (`lanes` in `1..=16`).
+///
+/// # Safety
+/// - `salt_24` must point to 24 readable bytes and `key_32_out` to 32 writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_kdf_parallel_derive(
+    pass: *const u8,
+    pass_len: usize,
+    salt_24: *const u8,
+    memory_blocks: u32,
+    passes: u32,
+    lanes: u32,
+    key_32_out: *mut u8,
+) -> i32 {
+    ffi_guard(|| {
+        if salt_24.is_null() || key_32_out.is_null() {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let derived = {
+            let pass_slice = match read_slice(pass, pass_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let salt: [u8; SALT_BYTES] = slice::from_raw_parts(salt_24, SALT_BYTES)
+                .try_into()
+                .expect("24 bytes");
+            let params = ParallelKdfParams {
+                memory_blocks,
+                passes,
+                lanes,
+            };
+            derive_key_parallel(pass_slice, None, &salt, params)
+        };
+        match derived {
+            Ok(key) => {
+                slice::from_raw_parts_mut(key_32_out, KEY_BYTES).copy_from_slice(key.as_bytes());
+                WILIS_OK
+            }
+            Err(_) => {
+                zeroize_bytes(slice::from_raw_parts_mut(key_32_out, KEY_BYTES));
+                WILIS_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Helper validating `(out, out_cap, out_len_out)` for variable-length output functions.
+/// Allows `(NULL, 0, out_len_out)` for two-call size discovery, but rejects `(NULL, >0, _)`
+/// or overlapping `(out, out_len_out)`.
+#[inline]
+fn valid_var_out_args(out: *mut u8, out_cap: usize, out_len_out: *mut usize) -> bool {
+    if out_len_out.is_null() || !valid_slice_len(out_cap) {
+        return false;
+    }
+    if out.is_null() {
+        return out_cap == 0;
+    }
+    if out_cap > 0
+        && ranges_overlap(
+            out,
+            out_cap,
+            out_len_out as *const u8,
+            core::mem::size_of::<usize>(),
+        )
+    {
+        return false;
+    }
+    true
+}
+
+/// Helper safely writing a variable-length result into `(out, out_cap, out_len_out)`,
+/// returning `WILIS_ERR_BUF_TOO_SMALL` and reporting required length in `*out_len_out` if too small.
+unsafe fn write_var_output(
+    mut data: Vec<u8>,
+    out: *mut u8,
+    out_cap: usize,
+    out_len_out: *mut usize,
+    sensitive: bool,
+) -> i32 {
+    let needed = data.len();
+    *out_len_out = needed;
+    if needed == 0 {
+        return WILIS_OK;
+    }
+    if out.is_null() || out_cap < needed {
+        if sensitive {
+            zeroize_bytes(&mut data);
+        }
+        return WILIS_ERR_BUF_TOO_SMALL;
+    }
+    slice::from_raw_parts_mut(out, needed).copy_from_slice(&data);
+    if sensitive {
+        zeroize_bytes(&mut data);
+    }
+    WILIS_OK
+}
+
+/// Post-Quantum Signcryption (`WPSC` v1: `WilisKEM` + `WilisSLH` + `WilisAEAD`).
+/// Writes required output length (`9894 + pt_len`) into `*out_len_out`.
+///
+/// # Safety
+/// - `sender_slh_sk` (`164` B), `recipient_kem_pk` (`1284` B), and `out_len_out` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_signcrypt(
+    sender_slh_sk: *const u8,
+    recipient_kem_pk: *const u8,
+    aad: *const u8,
+    aad_len: usize,
+    pt: *const u8,
+    pt_len: usize,
+    out: *mut u8,
+    out_cap: usize,
+    out_len_out: *mut usize,
+) -> i32 {
+    ffi_guard(|| {
+        if sender_slh_sk.is_null()
+            || recipient_kem_pk.is_null()
+            || !valid_var_out_args(out, out_cap, out_len_out)
+        {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let packet_res = {
+            let aad_slice = match read_slice(aad, aad_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let pt_slice = match read_slice(pt, pt_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let sk = match SlhSecretKey::from_bytes(slice::from_raw_parts(sender_slh_sk, SLH_SK_BYTES)) {
+                Ok(k) => k,
+                Err(_) => return WILIS_ERR_INVALID_ARG,
+            };
+            let pk = match KemPublicKey::from_bytes(slice::from_raw_parts(recipient_kem_pk, KEM_PK_BYTES)) {
+                Ok(k) => k,
+                Err(_) => return WILIS_ERR_INVALID_ARG,
+            };
+            signcrypt(&sk, &pk, pt_slice, aad_slice)
+        };
+        match packet_res {
+            Ok(pkt) => write_var_output(pkt, out, out_cap, out_len_out, false),
+            Err(_) => {
+                *out_len_out = 0;
+                WILIS_ERR_INTERNAL
+            }
+        }
+    })
+}
+
+/// Verifies sender `WilisSLH` signature and decrypts a `WPSC` v1 post-quantum signcrypted packet.
+///
+/// # Safety
+/// - `sender_slh_pk` (`100` B), `recipient_kem_sk` (`2600` B), and `pt_len_out` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_unsigncrypt(
+    sender_slh_pk: *const u8,
+    recipient_kem_sk: *const u8,
+    aad: *const u8,
+    aad_len: usize,
+    packet: *const u8,
+    packet_len: usize,
+    pt_out: *mut u8,
+    pt_cap: usize,
+    pt_len_out: *mut usize,
+) -> i32 {
+    ffi_guard(|| {
+        if sender_slh_pk.is_null()
+            || recipient_kem_sk.is_null()
+            || !valid_var_out_args(pt_out, pt_cap, pt_len_out)
+        {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let open_res = {
+            let aad_slice = match read_slice(aad, aad_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let pkt_slice = match read_slice(packet, packet_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let spk = match SlhPublicKey::from_bytes(slice::from_raw_parts(sender_slh_pk, SLH_PK_BYTES)) {
+                Ok(k) => k,
+                Err(_) => return WILIS_ERR_INVALID_ARG,
+            };
+            let rsk = match KemSecretKey::from_bytes(slice::from_raw_parts(recipient_kem_sk, KEM_SK_BYTES)) {
+                Ok(k) => k,
+                Err(_) => return WILIS_ERR_INVALID_ARG,
+            };
+            unsigncrypt(&spk, &rsk, pkt_slice, aad_slice)
+        };
+        match open_res {
+            Ok(pt) => write_var_output(pt, pt_out, pt_cap, pt_len_out, true),
+            Err(_) => {
+                *pt_len_out = 0;
+                if !pt_out.is_null() && pt_cap > 0 {
+                    zeroize_bytes(slice::from_raw_parts_mut(pt_out, pt_cap));
+                }
+                WILIS_ERR_AUTH_FAILED
+            }
+        }
+    })
+}
+
+/// Computes a `WilisTOTP` 2FA code (`6..=8` digits) at `unix_secs` and writes a NUL-terminated
+/// ASCII string into `code_out` (requires `code_cap >= digits + 1`).
+///
+/// # Safety
+/// - `secret` must point to `secret_len` readable bytes; `code_out` to `code_cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_totp_at(
+    secret: *const u8,
+    secret_len: usize,
+    unix_secs: u64,
+    period: u64,
+    digits: u32,
+    code_out: *mut u8,
+    code_cap: usize,
+    remaining_out: *mut u64,
+) -> i32 {
+    ffi_guard(|| {
+        if code_out.is_null() || !valid_slice_len(code_cap) {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        if !remaining_out.is_null()
+            && code_cap > 0
+            && ranges_overlap(
+                code_out,
+                code_cap,
+                remaining_out as *const u8,
+                core::mem::size_of::<u64>(),
+            )
+        {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let totp_res = {
+            let sec_slice = match read_slice(secret, secret_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            generate_totp_at(sec_slice, unix_secs, period, digits)
+        };
+        match totp_res {
+            Ok((code, rem)) => {
+                let bytes = code.as_bytes();
+                if code_cap < bytes.len() + 1 {
+                    return WILIS_ERR_BUF_TOO_SMALL;
+                }
+                let out_slice = slice::from_raw_parts_mut(code_out, bytes.len() + 1);
+                out_slice[..bytes.len()].copy_from_slice(bytes);
+                out_slice[bytes.len()] = 0;
+                if !remaining_out.is_null() {
+                    *remaining_out = rem;
+                }
+                WILIS_OK
+            }
+            Err(_) => WILIS_ERR_INVALID_ARG,
+        }
+    })
+}
+
+/// Format-Preserving Encryption (`WilisFPE`) over a UTF-8 `alphabet` (`2..=256` unique chars).
+///
+/// # Safety
+/// - `key_32` (`32` B) and `out_len_out` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_fpe_encrypt(
+    key_32: *const u8,
+    tweak: *const u8,
+    tweak_len: usize,
+    alphabet: *const u8,
+    alpha_len: usize,
+    pt: *const u8,
+    pt_len: usize,
+    out: *mut u8,
+    out_cap: usize,
+    out_len_out: *mut usize,
+) -> i32 {
+    ffi_guard(|| {
+        if key_32.is_null() || !valid_var_out_args(out, out_cap, out_len_out) {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let enc_res = {
+            let tweak_s = match read_slice(tweak, tweak_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let alpha_s = match read_slice(alphabet, alpha_len).and_then(|b| core::str::from_utf8(b).ok()) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let pt_s = match read_slice(pt, pt_len).and_then(|b| core::str::from_utf8(b).ok()) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let mut key: [u8; KEY_BYTES] = slice::from_raw_parts(key_32, KEY_BYTES)
+                .try_into()
+                .expect("32 bytes");
+            let r = fpe_encrypt_str(&key, tweak_s, alpha_s, pt_s);
+            zeroize_bytes(&mut key);
+            r
+        };
+        match enc_res {
+            Ok(s) => write_var_output(s.into_bytes(), out, out_cap, out_len_out, false),
+            Err(_) => {
+                *out_len_out = 0;
+                WILIS_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Exact inverse of [`wilis_fpe_encrypt`] (`WilisFPE` format-preserving decryption).
+///
+/// # Safety
+/// - `key_32` (`32` B) and `out_len_out` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_fpe_decrypt(
+    key_32: *const u8,
+    tweak: *const u8,
+    tweak_len: usize,
+    alphabet: *const u8,
+    alpha_len: usize,
+    ct: *const u8,
+    ct_len: usize,
+    out: *mut u8,
+    out_cap: usize,
+    out_len_out: *mut usize,
+) -> i32 {
+    ffi_guard(|| {
+        if key_32.is_null() || !valid_var_out_args(out, out_cap, out_len_out) {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let dec_res = {
+            let tweak_s = match read_slice(tweak, tweak_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let alpha_s = match read_slice(alphabet, alpha_len).and_then(|b| core::str::from_utf8(b).ok()) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let ct_s = match read_slice(ct, ct_len).and_then(|b| core::str::from_utf8(b).ok()) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let mut key: [u8; KEY_BYTES] = slice::from_raw_parts(key_32, KEY_BYTES)
+                .try_into()
+                .expect("32 bytes");
+            let r = fpe_decrypt_str(&key, tweak_s, alpha_s, ct_s);
+            zeroize_bytes(&mut key);
+            r
+        };
+        match dec_res {
+            Ok(s) => write_var_output(s.into_bytes(), out, out_cap, out_len_out, true),
+            Err(_) => {
+                *out_len_out = 0;
+                WILIS_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Encodes `secret[..secret_len]` into a checksummed 256-word phonetic mnemonic UTF-8 string.
+///
+/// # Safety
+/// - `out_len_out` must be a valid writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_mnemonic_encode(
+    secret: *const u8,
+    secret_len: usize,
+    out_utf8: *mut u8,
+    out_cap: usize,
+    out_len_out: *mut usize,
+) -> i32 {
+    ffi_guard(|| {
+        if !valid_var_out_args(out_utf8, out_cap, out_len_out) {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let phrase_res = {
+            let sec = match read_slice(secret, secret_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            encode_mnemonic(sec)
+        };
+        match phrase_res {
+            Ok(s) => write_var_output(s.into_bytes(), out_utf8, out_cap, out_len_out, true),
+            Err(_) => {
+                *out_len_out = 0;
+                WILIS_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Decodes and checksum-verifies a `WilisMnemonic` phrase back into raw secret bytes.
+///
+/// # Safety
+/// - `out_len_out` must be a valid writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_mnemonic_decode(
+    phrase: *const u8,
+    phrase_len: usize,
+    out: *mut u8,
+    out_cap: usize,
+    out_len_out: *mut usize,
+) -> i32 {
+    ffi_guard(|| {
+        if !valid_var_out_args(out, out_cap, out_len_out) {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let dec_res = {
+            let s = match read_slice(phrase, phrase_len).and_then(|b| core::str::from_utf8(b).ok()) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            decode_mnemonic(s)
+        };
+        match dec_res {
+            Ok(bytes) => write_var_output(bytes, out, out_cap, out_len_out, true),
+            Err(crate::error::WilisError::AuthenticationFailed) => {
+                *out_len_out = 0;
+                if !out.is_null() && out_cap > 0 {
+                    zeroize_bytes(slice::from_raw_parts_mut(out, out_cap));
+                }
+                WILIS_ERR_AUTH_FAILED
+            }
+            Err(_) => {
+                *out_len_out = 0;
+                WILIS_ERR_INVALID_ARG
+            }
+        }
+    })
+}
+
+/// Losslessly compresses `data[..data_len]` into a canonical `WLZ1` (`WilisLZ`) byte stream.
+///
+/// # Safety
+/// - `out_len_out` must be a valid writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_lz_compress(
+    data: *const u8,
+    data_len: usize,
+    out: *mut u8,
+    out_cap: usize,
+    out_len_out: *mut usize,
+) -> i32 {
+    ffi_guard(|| {
+        if !valid_var_out_args(out, out_cap, out_len_out) {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let comp = {
+            let input = match read_slice(data, data_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            compress(input)
+        };
+        write_var_output(comp, out, out_cap, out_len_out, false)
+    })
+}
+
+/// Decompresses a `WLZ1` (`WilisLZ`) stream enforcing `max_out` against decompression bombs.
+///
+/// # Safety
+/// - `out_len_out` must be a valid writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_lz_decompress(
+    data: *const u8,
+    data_len: usize,
+    max_out: usize,
+    out: *mut u8,
+    out_cap: usize,
+    out_len_out: *mut usize,
+) -> i32 {
+    ffi_guard(|| {
+        if !valid_var_out_args(out, out_cap, out_len_out) || !valid_slice_len(max_out) {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let dec_res = {
+            let input = match read_slice(data, data_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            decompress(input, max_out)
+        };
+        match dec_res {
+            Ok(bytes) => write_var_output(bytes, out, out_cap, out_len_out, false),
+            Err(_) => {
+                *out_len_out = 0;
+                WILIS_ERR_INVALID_ARG
+            }
         }
     })
 }

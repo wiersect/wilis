@@ -12,7 +12,7 @@ env:
 
 jobs:
   verify:
-    name: ${{ matrix.os }} — Test, Audit & FFI
+    name: ${{ matrix.os }} — Test, Audit & Multi-Language Bindings
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -53,7 +53,7 @@ jobs:
             ./target/release/wilis bench
           fi
 
-      - name: Verify C99 FFI header compiles cleanly (-Wall -Wextra -Werror)
+      - name: Verify C99 FFI header (all 33 exports, -Wall -Wextra -Werror)
         if: runner.os != 'Windows'
         shell: bash
         run: |
@@ -63,19 +63,24 @@ jobs:
           #include <string.h>
           #include "wilis.h"
           int main(void) {
+              assert(strcmp(wilis_version(), "0.7.0") == 0);
               uint8_t pk[WILIS_KEM_PK_BYTES], sk[WILIS_KEM_SK_BYTES];
               uint8_t ct[WILIS_KEM_CT_BYTES], ss1[WILIS_KEM_SS_BYTES], ss2[WILIS_KEM_SS_BYTES];
               assert(wilis_kem_keygen(pk, sk) == WILIS_OK);
               assert(wilis_kem_encapsulate(pk, ct, ss1) == WILIS_OK);
               assert(wilis_kem_decapsulate(sk, ct, ss2) == WILIS_OK);
-              assert(memcmp(ss1, ss2, WILIS_KEM_SS_BYTES) == 0);
+              assert(wilis_ct_eq(ss1, ss2, WILIS_KEM_SS_BYTES) == 1);
 
               uint8_t key[WILIS_KEY_BYTES] = {7};
-              const uint8_t msg[] = "wilis-v0.6.0-siv-c99";
+              uint8_t salt[WILIS_SALT_BYTES] = {3};
+              uint8_t kdf_out[WILIS_KEY_BYTES];
+              assert(wilis_kdf_parallel_derive((const uint8_t *)"pw", 2, salt, 128, 2, 2, kdf_out) == WILIS_OK);
+
+              const uint8_t msg[] = "wilis-v0.7.0-c99-full";
               uint8_t siv_ct[sizeof(msg)], siv_pt[sizeof(msg)], siv_tag[WILIS_SIV_TAG_BYTES];
               assert(wilis_siv_seal(key, NULL, 0, msg, sizeof(msg), siv_ct, siv_tag) == WILIS_OK);
               assert(wilis_siv_open(key, NULL, 0, siv_ct, sizeof(msg), siv_tag, siv_pt) == WILIS_OK);
-              assert(memcmp(msg, siv_pt, sizeof(msg)) == 0);
+              assert(wilis_ct_eq(msg, siv_pt, sizeof(msg)) == 1);
 
               uint8_t th[WILIS_HASH_BYTES];
               assert(wilis_tree_hash_256(msg, sizeof(msg), th) == WILIS_OK);
@@ -84,19 +89,122 @@ jobs:
               assert(wilis_slh_keygen(lpk, lsk) == WILIS_OK);
               assert(wilis_slh_sign(lsk, msg, sizeof(msg), lsig) == WILIS_OK);
               assert(wilis_slh_verify(lpk, msg, sizeof(msg), lsig) == WILIS_OK);
+
+              uint8_t wpsc[WILIS_SIGNCRYPT_OVERHEAD + sizeof(msg)];
+              size_t wpsc_len = 0, out_pt_len = 0;
+              assert(wilis_signcrypt(lsk, pk, NULL, 0, msg, sizeof(msg), wpsc, sizeof(wpsc), &wpsc_len) == WILIS_OK);
+              uint8_t out_pt[sizeof(msg)];
+              assert(wilis_unsigncrypt(lpk, sk, NULL, 0, wpsc, wpsc_len, out_pt, sizeof(out_pt), &out_pt_len) == WILIS_OK);
+              assert(out_pt_len == sizeof(msg) && wilis_ct_eq(msg, out_pt, sizeof(msg)) == 1);
+
+              uint8_t code[8];
+              uint64_t rem = 0;
+              assert(wilis_totp_at(key, sizeof(key), 1700000020ULL, 30ULL, 6U, code, sizeof(code), &rem) == WILIS_OK);
+              assert(rem == 20ULL && strlen((const char *)code) == 6);
+
+              uint8_t fpe_ct[32], fpe_pt[32];
+              size_t fpe_ct_len = 0, fpe_pt_len = 0;
+              const uint8_t alpha[] = "0123456789";
+              const uint8_t pan[] = "4111111111111111";
+              assert(wilis_fpe_encrypt(key, NULL, 0, alpha, 10, pan, 16, fpe_ct, sizeof(fpe_ct), &fpe_ct_len) == WILIS_OK);
+              assert(wilis_fpe_decrypt(key, NULL, 0, alpha, 10, fpe_ct, fpe_ct_len, fpe_pt, sizeof(fpe_pt), &fpe_pt_len) == WILIS_OK);
+              assert(fpe_pt_len == 16 && wilis_ct_eq(pan, fpe_pt, 16) == 1);
+
+              uint8_t phr[512], rec[64];
+              size_t phr_len = 0, rec_len = 0;
+              assert(wilis_mnemonic_encode(key, sizeof(key), phr, sizeof(phr), &phr_len) == WILIS_OK);
+              assert(wilis_mnemonic_decode(phr, phr_len, rec, sizeof(rec), &rec_len) == WILIS_OK);
+              assert(rec_len == sizeof(key) && wilis_ct_eq(key, rec, sizeof(key)) == 1);
+
+              uint8_t zbuf[128], dbuf[128];
+              size_t zlen = 0, dlen = 0;
+              assert(wilis_lz_compress(msg, sizeof(msg), zbuf, sizeof(zbuf), &zlen) == WILIS_OK);
+              assert(wilis_lz_decompress(zbuf, zlen, sizeof(dbuf), dbuf, sizeof(dbuf), &dlen) == WILIS_OK);
+              assert(dlen == sizeof(msg) && wilis_ct_eq(msg, dbuf, sizeof(msg)) == 1);
+
+              assert(wilis_zeroize(key, sizeof(key)) == WILIS_OK);
               return 0;
           }
           EOF
           cc -std=c99 -Wall -Wextra -Werror -Iinclude /tmp/wilis_ci_c99.c -Ltarget/release -lwilis -Wl,-rpath,"$PWD/target/release" -o /tmp/wilis_ci_c99
           /tmp/wilis_ci_c99
 
-      - name: Verify Python C-FFI binding against native libwilis
+      - name: Verify C++17 RAII header (include/wilis.hpp, -Wall -Wextra -Werror)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cat > /tmp/wilis_ci_cpp17.cpp << 'EOF'
+          #include <cassert>
+          #include <iostream>
+          #include "wilis.hpp"
+          int main() {
+              assert(wilis::version() == "0.7.0");
+              auto key_v = wilis::random_bytes(WILIS_KEY_BYTES);
+              wilis::Key key{};
+              std::copy(key_v.begin(), key_v.end(), key.begin());
+              wilis::Nonce nonce{};
+              wilis::Bytes pt = {'h','e','l','l','o',' ','c','+','+','1','7'};
+              auto [ct, tag] = wilis::aead_seal(key, nonce, {}, pt);
+              assert(wilis::ct_eq(wilis::aead_open(key, nonce, {}, ct, tag), pt));
+              auto [kpk, ksk] = wilis::kem_keygen();
+              auto [slh_pk, slh_sk] = wilis::slh_keygen();
+              auto pkt = wilis::signcrypt(slh_sk, kpk, {}, pt);
+              assert(wilis::ct_eq(wilis::unsigncrypt(slh_pk, ksk, {}, pkt), pt));
+              auto phr = wilis::mnemonic_encode(key_v);
+              assert(wilis::ct_eq(wilis::mnemonic_decode(phr), key_v));
+              auto z = wilis::lz_compress(pt);
+              assert(wilis::ct_eq(wilis::lz_decompress(z, 4096), pt));
+              auto fpe_ct = wilis::fpe_encrypt(key, {}, "0123456789", "4111111111111111");
+              assert(wilis::fpe_decrypt(key, {}, "0123456789", fpe_ct) == "4111111111111111");
+              auto [code, rem] = wilis::totp_at(key_v, 1700000020ULL);
+              assert(code.size() == 6 && rem == 20ULL);
+              std::cout << "Wilis C++17 RAII OK (v" << wilis::version() << ")\n";
+              return 0;
+          }
+          EOF
+          c++ -std=c++17 -Wall -Wextra -Werror -Iinclude /tmp/wilis_ci_cpp17.cpp -Ltarget/release -lwilis -Wl,-rpath,"$PWD/target/release" -o /tmp/wilis_ci_cpp17
+          /tmp/wilis_ci_cpp17
+
+      - name: Verify Python 3 binding (all 33 C-ABI exports)
         shell: bash
         run: |
           if command -v python3 >/dev/null 2>&1; then
             python3 -B bindings/python/wilis_py.py
           else
             python -B bindings/python/wilis_py.py
+          fi
+
+      - name: Verify Go cgo binding (all 33 C-ABI exports)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if command -v go >/dev/null 2>&1; then
+            (cd bindings/go && LD_LIBRARY_PATH="$PWD/../../target/release" DYLD_LIBRARY_PATH="$PWD/../../target/release" go test -v ./...)
+          fi
+
+      - name: Verify Node.js / TypeScript ESM binding
+        shell: bash
+        run: |
+          if command -v node >/dev/null 2>&1; then
+            node bindings/node/test.mjs
+          fi
+
+      - name: Verify Ruby stdlib Fiddle binding (all 33 C-ABI exports)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if command -v ruby >/dev/null 2>&1; then
+            ruby bindings/ruby/wilis.rb
+          fi
+
+      - name: Verify PHP 8+ FFI binding (all 33 C-ABI exports)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if command -v php >/dev/null 2>&1 && php -m | grep -qi '^FFI$'; then
+            php -d ffi.enable=true bindings/php/Wilis.php
+          else
+            echo "PHP FFI extension not preinstalled; skipping live PHP step."
           fi
 
   miri:

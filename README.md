@@ -11,9 +11,9 @@
 [![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)](.github/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-*One original 384-bit permutation. Zero external crypto libraries. NTT-accelerated Module-LWE KEM (`WPKE` v2), stateless (`WilisSLH`) & streaming stateful (`WilisSign`) PQ signatures, PQ Signcryption, PQ-PCS Ratchet & TCP P2P transport (`WilisNet`), AEAD & Nonce-Misuse-Resistant SIV, AVX2/NEON SIMD, parallel Merkle TreeHash & multi-lane KDF, TOTP/FPE/VSS/ZKP/TimeLock/PAKE, seekable & streaming v2 containers, plausible-deniability hidden volumes, BMP/WAV steganography, OS `mlock`/`shred`, C/Python/Go/Node bindings, and an 8-part scientific cryptanalysis + timing audit.*
+*One original 384-bit permutation. Zero external crypto libraries. NTT-accelerated Module-LWE KEM (`WPKE` v2), stateless (`WilisSLH`) & streaming stateful (`WilisSign`) PQ signatures, PQ Signcryption, PQ-PCS Ratchet & TCP P2P transport (`WilisNet`), AEAD & Nonce-Misuse-Resistant SIV, AVX2/NEON SIMD, parallel Merkle TreeHash & multi-lane KDF, TOTP/FPE/VSS/ZKP/TimeLock/PAKE, seekable & streaming v2 containers, plausible-deniability hidden volumes, BMP/WAV steganography, OS `mlock`/`shred`, **16 zero-dependency language bindings (33 C-ABI exports)**, and an 8-part scientific cryptanalysis + timing audit.*
 
-[Architecture](#architecture) · [Specification](SPECIFICATION.md) · [Audit Results](#verified-cryptanalysis--benchmarks) · [CLI Quickstart](#cli-quickstart) · [Bindings (C / Python / Go / Node)](#bindings) · [Security](SECURITY.md)
+[Architecture](#architecture) · [Specification](SPECIFICATION.md) · [Audit Results](#verified-cryptanalysis--benchmarks) · [CLI Quickstart](#cli-quickstart) · [Bindings (16 Languages)](#bindings-16-languages) · [Security](SECURITY.md)
 
 </div>
 
@@ -38,7 +38,7 @@
 | **`vault/` & `split/`** | **`WilisVault`, `WilisHidden`, `WilisSplit`** | Atomic vault (`rekey`/`search`/`totp`/`export`/`import`), **Plausible Deniability Hidden Volumes**, Shamir `K`-of-`N` over `GF(2^8)` |
 | **`utils/`** | **Hardening, Privacy & Formats** | OS `RLIMIT_CORE=0` / `PR_SET_DUMPABLE=0` / `mlock` (`LockedBuf`), **`shred`**, **`WilisLZ`**, **`WilisPad`**, **`WilisArmor`**, **256-word Mnemonic**, **`WENC`/`WKRN` Keyring**, **BMP/WAV Stego** |
 | **`audit/`** | **`wilis audit` (8-Part)** | SAC (1–16), BIC, exact DDT/LAT, NIST randomness, related-key, KEM CCA2, PQ protocols, **Welch's t-test (`dudect`) & NTT/SIMD/SIV/SLH** |
-| **`ffi/` & `bindings/`** | **`libwilis` C99 / Py / Go / Node** | Panic-safe C-ABI (`include/wilis.h`) + zero-dep Python 3, Go (cgo), and Node.js/TypeScript wrappers |
+| **`ffi/` & `bindings/`** | **`libwilis` (33 C-ABI, 16 Langs)** | Panic-safe C99 ABI (`include/wilis.h`) + C++17 RAII (`include/wilis.hpp`) + **16 zero-dep language bindings** |
 
 ---
 
@@ -55,7 +55,7 @@
 | **`WilisKEM` IND-CCA2 + NTT** | Zero decapsulation errors, FO implicit rejection, bit-exact NTT == schoolbook | Exact match & tamper reject | **PASS** |
 | **Empirical Constant-Time (`dudect`)** | Welch's t-test on `ct_eq` + bit-exact AVX2/NEON SIMD + SIV + SLH | `\|t\| < 12.0` & exact vectors | **PASS** |
 | **Adversarial Parser Fuzz & Miri UB** | 330+ malformed/truncated/overflow payloads across **all 39 parsers** + nightly Miri | **Zero panics, zero UB** | **PASS** |
-| **Cross-Platform CI & Test Suite** | **`60 / 60` tests passing** (Linux, macOS, Windows + Miri + KAT) | `-D warnings`, 0 external crates | **PASS** |
+| **Cross-Platform CI & Test Suite** | **`64 / 64` tests passing** (Linux, macOS, Windows + Miri + Multi-Lang CI) | `-D warnings`, 0 external crates | **PASS** |
 
 ---
 
@@ -65,16 +65,18 @@
 git clone https://github.com/wiersect/wilis.git
 cd wilis
 
-# Run all 60 tests (locked KAT vectors, NTT, SIMD, SIV, TreeHash, SLH, TCP P2P, protocols, FFI & 39-parser fuzz)
+# Run all 64 tests (locked KAT vectors, NTT, SIMD, SIV, TreeHash, SLH, TCP P2P, protocols, 33-fn FFI & 39-parser fuzz)
 cargo test
 
 # Build optimized CLI binary + native shared library (libwilis.so / .dylib / .dll)
 cargo build --release
 
-# Run 8-part scientific cryptanalysis + timing audit, NTT/SIMD benchmark, and Python C-FFI test
+# Run 8-part scientific cryptanalysis + timing audit, NTT/SIMD benchmark, and multi-language FFI tests
 ./target/release/wilis audit
 ./target/release/wilis bench
-python3 bindings/python/wilis_py.py
+python3 -B bindings/python/wilis_py.py
+(cd bindings/go && LD_LIBRARY_PATH=../../target/release go test -v ./...)
+node bindings/node/test.mjs
 ```
 
 ---
@@ -108,12 +110,14 @@ cat secret.txt | ./target/release/wilis encrypt-file --key "$KEY" --in - --out -
 
 ---
 
-## Bindings
+## Bindings (16 Languages)
 
-- **C / C++:** [`include/wilis.h`](include/wilis.h) — C99 strict (`-Wall -Wextra -Werror`) covering Hash, TreeHash, MAC, Subkey, XOF, AEAD, SIV, KDF, KEM, Stateful Sign & Stateless SLH.
-- **Python 3:** [`bindings/python/wilis_py.py`](bindings/python/wilis_py.py) — zero-dependency `ctypes` wrapper with automatic buffer zeroization.
-- **Go (cgo):** [`bindings/go/wilis.go`](bindings/go/wilis.go) — zero-dependency cgo wrapper over `include/wilis.h` & `libwilis`.
-- **Node.js / TypeScript:** [`bindings/node/wilis.mjs`](bindings/node/wilis.mjs) & [`bindings/node/wilis.d.ts`](bindings/node/wilis.d.ts) — zero-dependency ESM client using native stdio pipes.
+All **16 zero-dependency language bindings** expose full **33-function C-ABI parity** (`libwilis`) using only each language's built-in standard library / native FFI (see **[`bindings/README.md`](bindings/README.md)** for the full matrix & quickstart):
+
+- **Systems / Native:** **C99** ([`include/wilis.h`](include/wilis.h)) · **C++17 RAII** ([`include/wilis.hpp`](include/wilis.hpp)) · **Zig** ([`bindings/zig/wilis.zig`](bindings/zig/wilis.zig)) · **Swift** ([`bindings/swift/Wilis.swift`](bindings/swift/Wilis.swift))
+- **Backend / JVM / .NET:** **Go (cgo)** ([`bindings/go/wilis.go`](bindings/go/wilis.go)) · **C# / .NET** ([`bindings/csharp/Wilis.cs`](bindings/csharp/Wilis.cs)) · **Java 22+ Panama FFM** ([`bindings/java/Wilis.java`](bindings/java/Wilis.java)) · **Kotlin** ([`bindings/kotlin/Wilis.kt`](bindings/kotlin/Wilis.kt))
+- **JavaScript / TypeScript Runtimes:** **Node.js ESM + Native N-API** ([`bindings/node/wilis.mjs`](bindings/node/wilis.mjs) / [`wilis_napi.c`](bindings/node/wilis_napi.c)) · **Deno FFI** ([`bindings/deno/wilis.ts`](bindings/deno/wilis.ts)) · **Bun FFI** ([`bindings/bun/wilis.ts`](bindings/bun/wilis.ts))
+- **Scripting & Cross-Platform:** **Python 3 `ctypes`** ([`bindings/python/wilis_py.py`](bindings/python/wilis_py.py)) · **Ruby `Fiddle`** ([`bindings/ruby/wilis.rb`](bindings/ruby/wilis.rb)) · **PHP 8+ `FFI`** ([`bindings/php/Wilis.php`](bindings/php/Wilis.php)) · **LuaJIT `ffi`** ([`bindings/lua/wilis.lua`](bindings/lua/wilis.lua)) · **Dart `dart:ffi`** ([`bindings/dart/wilis.dart`](bindings/dart/wilis.dart))
 
 ---
 

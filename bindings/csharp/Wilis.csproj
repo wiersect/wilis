@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <AssemblyName>Wilis</AssemblyName>
+    <RootNamespace>WilisCrypto</RootNamespace>
+    <Version>0.7.0</Version>
+    <Description>Zero-dependency .NET P/Invoke bindings for Wilis post-quantum &amp; symmetric cryptography (33 C-ABI exports).</Description>
+  </PropertyGroup>
+</Project>

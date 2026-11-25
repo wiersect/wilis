@@ -1,0 +1,5 @@
+module CWilis [system] {
+    header "../../include/wilis.h"
+    link "wilis"
+    export *
+}

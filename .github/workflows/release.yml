@@ -50,18 +50,16 @@ jobs:
       - name: Build release binary and shared library
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package Unix release tarball
+      - name: Package Unix release tarball (with all 16 language bindings)
         if: ${{ !matrix.is_windows }}
         shell: bash
         run: |
           PKG="dist/${{ matrix.asset_name }}"
-          mkdir -p "$PKG/include" "$PKG/bindings/python" "$PKG/bindings/go" "$PKG/bindings/node"
+          mkdir -p "$PKG/include"
           cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "$PKG/"
           cp "target/${{ matrix.target }}/release/${{ matrix.lib_name }}" "$PKG/"
-          cp include/wilis.h "$PKG/include/"
-          cp bindings/python/wilis_py.py "$PKG/bindings/python/"
-          cp bindings/go/wilis.go "$PKG/bindings/go/"
-          cp bindings/node/wilis.mjs bindings/node/wilis.d.ts "$PKG/bindings/node/"
+          cp include/wilis.h include/wilis.hpp "$PKG/include/"
+          cp -r bindings "$PKG/"
           cp README.md LICENSE SPECIFICATION.md SECURITY.md CHANGELOG.md "$PKG/"
           tar -C dist -czf "${{ matrix.asset_name }}.tar.gz" "${{ matrix.asset_name }}"
           if command -v sha256sum >/dev/null 2>&1; then
@@ -70,18 +68,16 @@ jobs:
             shasum -a 256 "${{ matrix.asset_name }}.tar.gz" > "${{ matrix.asset_name }}.tar.gz.sha256"
           fi
 
-      - name: Package Windows release zip
+      - name: Package Windows release zip (with all 16 language bindings)
         if: ${{ matrix.is_windows }}
         shell: pwsh
         run: |
           $pkg = "dist/${{ matrix.asset_name }}"
-          New-Item -ItemType Directory -Force -Path "$pkg/include", "$pkg/bindings/python", "$pkg/bindings/go", "$pkg/bindings/node" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$pkg/include" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "$pkg/"
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.lib_name }}" "$pkg/"
-          Copy-Item "include/wilis.h" "$pkg/include/"
-          Copy-Item "bindings/python/wilis_py.py" "$pkg/bindings/python/"
-          Copy-Item "bindings/go/wilis.go" "$pkg/bindings/go/"
-          Copy-Item "bindings/node/wilis.mjs", "bindings/node/wilis.d.ts" "$pkg/bindings/node/"
+          Copy-Item "include/wilis.h", "include/wilis.hpp" "$pkg/include/"
+          Copy-Item -Recurse "bindings" "$pkg/bindings"
           Copy-Item "README.md", "LICENSE", "SPECIFICATION.md", "SECURITY.md", "CHANGELOG.md" "$pkg/"
           Compress-Archive -Path "$pkg" -DestinationPath "${{ matrix.asset_name }}.zip" -Force
           $hash = (Get-FileHash "${{ matrix.asset_name }}.zip" -Algorithm SHA256).Hash.ToLower()

@@ -2,6 +2,29 @@
 
 All notable changes to **Wilis** are documented in this file.
 
+## [0.7.0] - 2026-11-25
+
+### Polyglot SDK Release — 33-Function C-ABI & 16 Zero-Dependency Language Bindings
+Preserves **zero external Rust dependencies** (`[dependencies]` empty), **zero external dependencies across all 16 language bindings**, and **100% backward ABI/wire compatibility** with all prior `v0.4.x`–`v0.6.0` releases.
+
+- **Expanded `libwilis` C99 ABI (`ffi/c_api.rs`, `include/wilis.h`) — 21 → 33 Exported Functions**:
+  - Added `WILIS_ERR_BUF_TOO_SMALL = -4`, `WILIS_SIGNCRYPT_OVERHEAD = 9894`, strict two-call variable-length output sizing, overlap/null guards, and error-path output wiping.
+  - Exported 12 new functions: `wilis_ct_eq`, `wilis_zeroize`, `wilis_kdf_parallel_derive`, `wilis_signcrypt`, `wilis_unsigncrypt`, `wilis_totp_at`, `wilis_fpe_encrypt`, `wilis_fpe_decrypt`, `wilis_mnemonic_encode`, `wilis_mnemonic_decode`, `wilis_lz_compress`, `wilis_lz_decompress`.
+- **16 Zero-Dependency Language & Runtime Bindings (`include/wilis.hpp`, `bindings/`)**:
+  - **C99** (`include/wilis.h`) & **C++17 Header-Only RAII** (`include/wilis.hpp` with auto-zeroizing `SecretArray<N>`).
+  - **Python 3** (`bindings/python/wilis_py.py`, stdlib `ctypes` — upgraded to 33/33 functions).
+  - **Go** (`bindings/go/wilis.go`, `go.mod`, `wilis_test.go`, native `cgo` — upgraded to 33/33 functions).
+  - **Node.js / TypeScript** (`bindings/node/wilis.mjs`, `wilis.d.ts`, `test.mjs`, plus native N-API C addon `wilis_napi.c` & `binding.gyp`).
+  - **Deno** (`bindings/deno/wilis.ts`, built-in `Deno.dlopen` — 33/33) & **Bun** (`bindings/bun/wilis.ts`, built-in `bun:ffi` — 33/33).
+  - **C# / .NET 8+** (`bindings/csharp/Wilis.cs`, `Wilis.csproj`, P/Invoke + `WilisSecret` `IDisposable` — 33/33).
+  - **Java 22+ Project Panama FFM** (`bindings/java/Wilis.java`, `java.lang.foreign` — 33/33) & **Kotlin JVM** (`bindings/kotlin/Wilis.kt` — 33/33).
+  - **Zig 0.13+** (`bindings/zig/wilis.zig`, native `extern "c"` — 33/33) & **Swift** (`bindings/swift/Wilis.swift`, `module.modulemap` — 33/33).
+  - **Ruby 3+** (`bindings/ruby/wilis.rb`, stdlib `Fiddle` — 33/33), **PHP 8+** (`bindings/php/Wilis.php`, built-in `FFI` — 33/33), **LuaJIT** (`bindings/lua/wilis.lua`, `ffi.cdef` — 33/33), and **Dart 3+** (`bindings/dart/wilis.dart`, `dart:ffi` — 33/33).
+  - Unified matrix & quickstart reference in [`bindings/README.md`](bindings/README.md).
+- **Multi-Language CI, Release Packaging & Test Suite (`tests/v070_ffi_bindings.rs`, `.github/workflows/`)**:
+  - Added `tests/v070_ffi_bindings.rs` verifying all 12 new C-ABI exports, two-call sizing, error wiping, null/overlap rejection, and LZ bomb guards (**64 / 64 passing tests**).
+  - Expanded GitHub Actions CI to live-test **C99**, **C++17**, **Python 3**, **Go**, **Node.js**, **Ruby**, and **PHP** against compiled `libwilis`, and updated `release.yml` to ship all 16 bindings in every Linux, macOS, and Windows archive.
+
 ## [0.6.0] - 2026-11-25
 
 ### Major Platform Release — NTT/SIMD Acceleration, SIV, TreeHash, Parallel KDF, Stateless `WilisSLH`, Signcryption, 6 Crypto Protocols, `WilisNet` PQ TCP, Seekable/Streaming v2 Containers, OS Hardening, Multi-Language Bindings & 8-Part Audit

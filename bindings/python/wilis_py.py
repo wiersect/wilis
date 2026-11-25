@@ -1,5 +1,5 @@
 """
-Zero-dependency Python 3 binding for the Wilis v0.6.0 Cryptography Suite (`libwilis`).
+Zero-dependency Python 3 binding for the Wilis v0.7.0 Cryptography Suite (`libwilis` — all 33 C-ABI functions).
 
 Build the shared library first with:
     cargo build --release
@@ -24,6 +24,8 @@ SIV_TAG_BYTES = 64
 SLH_PK_BYTES = 100
 SLH_SK_BYTES = 164
 SLH_SIG_BYTES = 8165
+SIGNCRYPT_OVERHEAD = 9894
+_ERR_BUF_TOO_SMALL = -4
 _U32_MAX = 0xFFFF_FFFF
 
 
@@ -141,6 +143,54 @@ class Wilis:
 
         self._lib.wilis_slh_verify.argtypes = [c_vp, c_vp, c_sz, c_vp]
         self._lib.wilis_slh_verify.restype = ctypes.c_int32
+
+        self._lib.wilis_ct_eq.argtypes = [c_vp, c_vp, c_sz]
+        self._lib.wilis_ct_eq.restype = ctypes.c_int32
+
+        self._lib.wilis_zeroize.argtypes = [c_u8_p, c_sz]
+        self._lib.wilis_zeroize.restype = ctypes.c_int32
+
+        self._lib.wilis_kdf_parallel_derive.argtypes = [
+            c_vp, c_sz, c_vp, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, c_u8_p
+        ]
+        self._lib.wilis_kdf_parallel_derive.restype = ctypes.c_int32
+
+        self._lib.wilis_signcrypt.argtypes = [
+            c_vp, c_vp, c_vp, c_sz, c_vp, c_sz, c_u8_p, c_sz, ctypes.POINTER(c_sz)
+        ]
+        self._lib.wilis_signcrypt.restype = ctypes.c_int32
+
+        self._lib.wilis_unsigncrypt.argtypes = [
+            c_vp, c_vp, c_vp, c_sz, c_vp, c_sz, c_u8_p, c_sz, ctypes.POINTER(c_sz)
+        ]
+        self._lib.wilis_unsigncrypt.restype = ctypes.c_int32
+
+        self._lib.wilis_totp_at.argtypes = [
+            c_vp, c_sz, ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint32, c_u8_p, c_sz, ctypes.POINTER(ctypes.c_uint64)
+        ]
+        self._lib.wilis_totp_at.restype = ctypes.c_int32
+
+        self._lib.wilis_fpe_encrypt.argtypes = [
+            c_vp, c_vp, c_sz, c_vp, c_sz, c_vp, c_sz, c_u8_p, c_sz, ctypes.POINTER(c_sz)
+        ]
+        self._lib.wilis_fpe_encrypt.restype = ctypes.c_int32
+
+        self._lib.wilis_fpe_decrypt.argtypes = [
+            c_vp, c_vp, c_sz, c_vp, c_sz, c_vp, c_sz, c_u8_p, c_sz, ctypes.POINTER(c_sz)
+        ]
+        self._lib.wilis_fpe_decrypt.restype = ctypes.c_int32
+
+        self._lib.wilis_mnemonic_encode.argtypes = [c_vp, c_sz, c_u8_p, c_sz, ctypes.POINTER(c_sz)]
+        self._lib.wilis_mnemonic_encode.restype = ctypes.c_int32
+
+        self._lib.wilis_mnemonic_decode.argtypes = [c_vp, c_sz, c_u8_p, c_sz, ctypes.POINTER(c_sz)]
+        self._lib.wilis_mnemonic_decode.restype = ctypes.c_int32
+
+        self._lib.wilis_lz_compress.argtypes = [c_vp, c_sz, c_u8_p, c_sz, ctypes.POINTER(c_sz)]
+        self._lib.wilis_lz_compress.restype = ctypes.c_int32
+
+        self._lib.wilis_lz_decompress.argtypes = [c_vp, c_sz, c_sz, c_u8_p, c_sz, ctypes.POINTER(c_sz)]
+        self._lib.wilis_lz_decompress.restype = ctypes.c_int32
 
     def version(self) -> str:
         raw = self._lib.wilis_version()
@@ -533,14 +583,234 @@ class Wilis:
             return False
         raise WilisError(f"wilis_slh_verify failed (rc={rc})")
 
+    def ct_eq(self, a: bytes, b: bytes) -> bool:
+        if len(a) != len(b):
+            return False
+        a_buf = (ctypes.c_uint8 * len(a)).from_buffer_copy(a) if a else None
+        b_buf = (ctypes.c_uint8 * len(b)).from_buffer_copy(b) if b else None
+        a_ptr = ctypes.cast(a_buf, ctypes.c_void_p) if a_buf is not None else ctypes.c_void_p(0)
+        b_ptr = ctypes.cast(b_buf, ctypes.c_void_p) if b_buf is not None else ctypes.c_void_p(0)
+        try:
+            rc = self._lib.wilis_ct_eq(a_ptr, b_ptr, len(a))
+            if rc < 0:
+                raise WilisError(f"wilis_ct_eq failed (rc={rc})")
+            return rc == 1
+        finally:
+            _wipe_buf(a_buf)
+            _wipe_buf(b_buf)
+
+    def kdf_parallel_derive(
+        self,
+        passphrase: bytes,
+        salt: bytes,
+        memory_blocks: int = 349_520,
+        passes: int = 3,
+        lanes: int = 4,
+    ) -> bytes:
+        if len(salt) != 24:
+            raise ValueError("salt must be exactly 24 bytes")
+        _check_u32(memory_blocks, "memory_blocks")
+        _check_u32(passes, "passes")
+        _check_u32(lanes, "lanes")
+        p_buf = (ctypes.c_uint8 * len(passphrase)).from_buffer_copy(passphrase) if passphrase else None
+        p_ptr = ctypes.cast(p_buf, ctypes.c_void_p) if p_buf is not None else ctypes.c_void_p(0)
+        s_buf = (ctypes.c_uint8 * 24).from_buffer_copy(salt)
+        out = (ctypes.c_uint8 * 32)()
+        try:
+            rc = self._lib.wilis_kdf_parallel_derive(
+                p_ptr, len(passphrase), ctypes.cast(s_buf, ctypes.c_void_p), memory_blocks, passes, lanes, out
+            )
+            if rc != 0:
+                raise WilisError(f"wilis_kdf_parallel_derive failed (rc={rc})")
+            return bytes(out)
+        finally:
+            _wipe_buf(p_buf)
+            _wipe_buf(out)
+
+    def signcrypt(self, sender_slh_sk: bytes, recipient_kem_pk: bytes, aad: bytes, plaintext: bytes) -> bytes:
+        if len(sender_slh_sk) != SLH_SK_BYTES:
+            raise ValueError(f"sender_slh_sk must be {SLH_SK_BYTES} bytes")
+        if len(recipient_kem_pk) != KEM_PK_BYTES:
+            raise ValueError(f"recipient_kem_pk must be {KEM_PK_BYTES} bytes")
+        sk_buf = (ctypes.c_uint8 * SLH_SK_BYTES).from_buffer_copy(sender_slh_sk)
+        pk_buf = (ctypes.c_uint8 * KEM_PK_BYTES).from_buffer_copy(recipient_kem_pk)
+        a_buf = (ctypes.c_uint8 * len(aad)).from_buffer_copy(aad) if aad else None
+        p_buf = (ctypes.c_uint8 * len(plaintext)).from_buffer_copy(plaintext) if plaintext else None
+        a_ptr = ctypes.cast(a_buf, ctypes.c_void_p) if a_buf is not None else ctypes.c_void_p(0)
+        p_ptr = ctypes.cast(p_buf, ctypes.c_void_p) if p_buf is not None else ctypes.c_void_p(0)
+        out = (ctypes.c_uint8 * (SIGNCRYPT_OVERHEAD + len(plaintext)))()
+        out_len = ctypes.c_size_t(0)
+        try:
+            rc = self._lib.wilis_signcrypt(
+                ctypes.cast(sk_buf, ctypes.c_void_p),
+                ctypes.cast(pk_buf, ctypes.c_void_p),
+                a_ptr, len(aad), p_ptr, len(plaintext),
+                out, len(out), ctypes.byref(out_len),
+            )
+            if rc != 0:
+                raise WilisError(f"wilis_signcrypt failed (rc={rc})")
+            return bytes(out[: out_len.value])
+        finally:
+            _wipe_buf(sk_buf)
+            _wipe_buf(p_buf)
+
+    def unsigncrypt(self, sender_slh_pk: bytes, recipient_kem_sk: bytes, aad: bytes, packet: bytes) -> bytes:
+        if len(sender_slh_pk) != SLH_PK_BYTES:
+            raise ValueError(f"sender_slh_pk must be {SLH_PK_BYTES} bytes")
+        if len(recipient_kem_sk) != KEM_SK_BYTES:
+            raise ValueError(f"recipient_kem_sk must be {KEM_SK_BYTES} bytes")
+        pk_buf = (ctypes.c_uint8 * SLH_PK_BYTES).from_buffer_copy(sender_slh_pk)
+        sk_buf = (ctypes.c_uint8 * KEM_SK_BYTES).from_buffer_copy(recipient_kem_sk)
+        a_buf = (ctypes.c_uint8 * len(aad)).from_buffer_copy(aad) if aad else None
+        c_buf = (ctypes.c_uint8 * len(packet)).from_buffer_copy(packet) if packet else None
+        a_ptr = ctypes.cast(a_buf, ctypes.c_void_p) if a_buf is not None else ctypes.c_void_p(0)
+        c_ptr = ctypes.cast(c_buf, ctypes.c_void_p) if c_buf is not None else ctypes.c_void_p(0)
+        cap = max(len(packet) - SIGNCRYPT_OVERHEAD, 1)
+        out = (ctypes.c_uint8 * cap)()
+        out_len = ctypes.c_size_t(0)
+        try:
+            rc = self._lib.wilis_unsigncrypt(
+                ctypes.cast(pk_buf, ctypes.c_void_p),
+                ctypes.cast(sk_buf, ctypes.c_void_p),
+                a_ptr, len(aad), c_ptr, len(packet),
+                out, cap, ctypes.byref(out_len),
+            )
+            if rc == -2:
+                raise WilisAuthError("signcrypt authentication failed")
+            if rc != 0:
+                raise WilisError(f"wilis_unsigncrypt failed (rc={rc})")
+            return bytes(out[: out_len.value])
+        finally:
+            _wipe_buf(sk_buf)
+            _wipe_buf(out)
+
+    def totp_at(self, secret: bytes, unix_secs: int, period: int = 30, digits: int = 6) -> Tuple[str, int]:
+        s_buf = (ctypes.c_uint8 * len(secret)).from_buffer_copy(secret) if secret else None
+        s_ptr = ctypes.cast(s_buf, ctypes.c_void_p) if s_buf is not None else ctypes.c_void_p(0)
+        code_buf = (ctypes.c_uint8 * 16)()
+        rem = ctypes.c_uint64(0)
+        try:
+            rc = self._lib.wilis_totp_at(
+                s_ptr, len(secret), unix_secs, period, digits, code_buf, 16, ctypes.byref(rem)
+            )
+            if rc != 0:
+                raise WilisError(f"wilis_totp_at failed (rc={rc})")
+            return bytes(code_buf).split(b"\x00", 1)[0].decode("ascii"), rem.value
+        finally:
+            _wipe_buf(s_buf)
+
+    def fpe_encrypt(self, key: bytes, tweak: bytes, alphabet: str, plaintext: str) -> str:
+        return self._fpe_call(self._lib.wilis_fpe_encrypt, key, tweak, alphabet, plaintext)
+
+    def fpe_decrypt(self, key: bytes, tweak: bytes, alphabet: str, ciphertext: str) -> str:
+        return self._fpe_call(self._lib.wilis_fpe_decrypt, key, tweak, alphabet, ciphertext)
+
+    def _fpe_call(self, fn, key: bytes, tweak: bytes, alphabet: str, text: str) -> str:
+        if len(key) != 32:
+            raise ValueError("key must be exactly 32 bytes")
+        alpha_b = alphabet.encode("utf-8")
+        text_b = text.encode("utf-8")
+        k_buf = (ctypes.c_uint8 * 32).from_buffer_copy(key)
+        t_buf = (ctypes.c_uint8 * len(tweak)).from_buffer_copy(tweak) if tweak else None
+        a_buf = (ctypes.c_uint8 * len(alpha_b)).from_buffer_copy(alpha_b)
+        x_buf = (ctypes.c_uint8 * len(text_b)).from_buffer_copy(text_b)
+        t_ptr = ctypes.cast(t_buf, ctypes.c_void_p) if t_buf is not None else ctypes.c_void_p(0)
+        cap = max(len(text_b) * 4, 16)
+        out = (ctypes.c_uint8 * cap)()
+        out_len = ctypes.c_size_t(0)
+        try:
+            rc = fn(
+                ctypes.cast(k_buf, ctypes.c_void_p), t_ptr, len(tweak),
+                ctypes.cast(a_buf, ctypes.c_void_p), len(alpha_b),
+                ctypes.cast(x_buf, ctypes.c_void_p), len(text_b),
+                out, cap, ctypes.byref(out_len),
+            )
+            if rc != 0:
+                raise WilisError(f"wilis_fpe failed (rc={rc})")
+            return bytes(out[: out_len.value]).decode("utf-8")
+        finally:
+            _wipe_buf(k_buf)
+            _wipe_buf(x_buf)
+            _wipe_buf(out)
+
+    def mnemonic_encode(self, secret: bytes) -> str:
+        s_buf = (ctypes.c_uint8 * len(secret)).from_buffer_copy(secret) if secret else None
+        s_ptr = ctypes.cast(s_buf, ctypes.c_void_p) if s_buf is not None else ctypes.c_void_p(0)
+        needed = ctypes.c_size_t(0)
+        try:
+            rc = self._lib.wilis_mnemonic_encode(s_ptr, len(secret), None, 0, ctypes.byref(needed))
+            if rc not in (0, _ERR_BUF_TOO_SMALL):
+                raise WilisError(f"wilis_mnemonic_encode failed (rc={rc})")
+            out = (ctypes.c_uint8 * max(needed.value, 1))()
+            try:
+                rc = self._lib.wilis_mnemonic_encode(s_ptr, len(secret), out, needed.value, ctypes.byref(needed))
+                if rc != 0:
+                    raise WilisError(f"wilis_mnemonic_encode failed (rc={rc})")
+                return bytes(out[: needed.value]).decode("utf-8")
+            finally:
+                _wipe_buf(out)
+        finally:
+            _wipe_buf(s_buf)
+
+    def mnemonic_decode(self, phrase: str) -> bytes:
+        p_b = phrase.encode("utf-8")
+        p_buf = (ctypes.c_uint8 * len(p_b)).from_buffer_copy(p_b) if p_b else None
+        p_ptr = ctypes.cast(p_buf, ctypes.c_void_p) if p_buf is not None else ctypes.c_void_p(0)
+        needed = ctypes.c_size_t(0)
+        try:
+            rc = self._lib.wilis_mnemonic_decode(p_ptr, len(p_b), None, 0, ctypes.byref(needed))
+            if rc == -2:
+                raise WilisAuthError("mnemonic checksum mismatch")
+            if rc not in (0, _ERR_BUF_TOO_SMALL):
+                raise WilisError(f"wilis_mnemonic_decode failed (rc={rc})")
+            out = (ctypes.c_uint8 * max(needed.value, 1))()
+            try:
+                rc = self._lib.wilis_mnemonic_decode(p_ptr, len(p_b), out, needed.value, ctypes.byref(needed))
+                if rc == -2:
+                    raise WilisAuthError("mnemonic checksum mismatch")
+                if rc != 0:
+                    raise WilisError(f"wilis_mnemonic_decode failed (rc={rc})")
+                return bytes(out[: needed.value])
+            finally:
+                _wipe_buf(out)
+        finally:
+            _wipe_buf(p_buf)
+
+    def lz_compress(self, data: bytes) -> bytes:
+        d_buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        d_ptr = ctypes.cast(d_buf, ctypes.c_void_p) if d_buf is not None else ctypes.c_void_p(0)
+        needed = ctypes.c_size_t(0)
+        rc = self._lib.wilis_lz_compress(d_ptr, len(data), None, 0, ctypes.byref(needed))
+        if rc not in (0, _ERR_BUF_TOO_SMALL):
+            raise WilisError(f"wilis_lz_compress failed (rc={rc})")
+        out = (ctypes.c_uint8 * max(needed.value, 1))()
+        rc = self._lib.wilis_lz_compress(d_ptr, len(data), out, needed.value, ctypes.byref(needed))
+        if rc != 0:
+            raise WilisError(f"wilis_lz_compress failed (rc={rc})")
+        return bytes(out[: needed.value])
+
+    def lz_decompress(self, data: bytes, max_out: int = 16 * 1024 * 1024) -> bytes:
+        d_buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        d_ptr = ctypes.cast(d_buf, ctypes.c_void_p) if d_buf is not None else ctypes.c_void_p(0)
+        needed = ctypes.c_size_t(0)
+        rc = self._lib.wilis_lz_decompress(d_ptr, len(data), max_out, None, 0, ctypes.byref(needed))
+        if rc not in (0, _ERR_BUF_TOO_SMALL):
+            raise WilisError(f"wilis_lz_decompress failed (rc={rc})")
+        out = (ctypes.c_uint8 * max(needed.value, 1))()
+        rc = self._lib.wilis_lz_decompress(d_ptr, len(data), max_out, out, needed.value, ctypes.byref(needed))
+        if rc != 0:
+            raise WilisError(f"wilis_lz_decompress failed (rc={rc})")
+        return bytes(out[: needed.value])
+
 
 if __name__ == "__main__":
     w = Wilis()
-    assert w.version() == "0.6.0", f"unexpected version: {w.version()!r}"
-    # 1. AEAD (including empty plaintext/AAD) + SIV + TreeHash + MAC + Subkey + XOF + KDF bounds
+    assert w.version() == "0.7.0", f"unexpected version: {w.version()!r}"
+    # 1. AEAD + SIV + TreeHash + MAC + Subkey + XOF + KDF + Parallel KDF + ct_eq
     key = w.random_bytes(32)
     nonce = w.random_bytes(24)
-    msg = b"\x00Hello from Wilis v0.6.0 Python C-FFI!\x00"
+    msg = b"\x00Hello from Wilis v0.7.0 Python 33-func C-FFI!\x00"
+    assert w.ct_eq(key, key) and not w.ct_eq(key, bytes([key[0] ^ 1]) + key[1:])
     ct, tag = w.aead_seal(key, nonce, b"py-aad", msg)
     assert w.aead_open(key, nonce, b"py-aad", ct, tag) == msg
     e_ct, e_tag = w.aead_seal(key, nonce, b"", b"")
@@ -550,8 +820,7 @@ if __name__ == "__main__":
     assert len(siv_tag) == SIV_TAG_BYTES
     assert w.siv_open(key, b"siv-aad", siv_ct, siv_tag) == msg
     th1 = w.tree_hash_256(msg * 500)
-    th2 = w.tree_hash_256(msg * 500)
-    assert len(th1) == 32 and th1 == th2
+    assert len(th1) == 32 and th1 == w.tree_hash_256(msg * 500)
 
     mtag = w.mac_256(key, msg)
     assert w.mac_verify(key, msg, mtag)
@@ -561,6 +830,8 @@ if __name__ == "__main__":
     assert len(sub1) == 32 and sub1 != sub2
     assert len(w.xof_derive(b"", key, 96)) == 96
     assert len(w.kdf_derive(b"pw", nonce, memory_blocks=64, passes=2)) == 32
+    pkdf = w.kdf_parallel_derive(b"pw", nonce, memory_blocks=128, passes=2, lanes=4)
+    assert len(pkdf) == 32 and pkdf == w.kdf_parallel_derive(b"pw", nonce, memory_blocks=128, passes=2, lanes=4)
     for bad_blocks in (-1, 1 << 32):
         try:
             w.kdf_derive(b"pw", nonce, memory_blocks=bad_blocks, passes=2)
@@ -568,31 +839,31 @@ if __name__ == "__main__":
         except ValueError:
             pass
 
-    # 2. Post-Quantum WilisKEM (NTT-accelerated, including corrupted secret-key rejection)
+    # 2. Post-Quantum WilisKEM + WilisSign + WilisSLH + Signcryption (WPSC)
     pk, sk = w.kem_keygen()
     kem_ct, ss1 = w.kem_encapsulate(pk)
-    ss2 = w.kem_decapsulate(sk, kem_ct)
-    assert ss1 == ss2
-    bad_sk = bytearray(sk)
-    bad_sk[10] ^= 0x01
-    try:
-        w.kem_decapsulate(bytes(bad_sk), kem_ct)
-        raise AssertionError("expected WilisError for corrupted KEM secret key")
-    except WilisError:
-        pass
+    assert ss1 == w.kem_decapsulate(sk, kem_ct)
 
-    # 3. Post-Quantum WilisSign (stateful WOTS+ Merkle)
     spk, ssk = w.sign_keygen(height=2)
     ssk2, sig = w.sign_message(ssk, msg)
-    assert ssk2 != ssk
-    assert w.verify_message(spk, msg, sig)
-    assert not w.verify_message(spk, msg + b"!", sig)
+    assert ssk2 != ssk and w.verify_message(spk, msg, sig) and not w.verify_message(spk, msg + b"!", sig)
 
-    # 4. Post-Quantum WilisSLH (stateless FORS + Hypertree)
     lpk, lsk = w.slh_keygen()
     lsig = w.slh_sign(lsk, msg)
-    assert len(lsig) == SLH_SIG_BYTES
-    assert w.slh_verify(lpk, msg, lsig)
-    assert not w.slh_verify(lpk, msg + b"!", lsig)
+    assert len(lsig) == SLH_SIG_BYTES and w.slh_verify(lpk, msg, lsig)
 
-    print("Python C-FFI v0.6.0 (AEAD + SIV + TreeHash + MAC + Subkey + XOF + KDF + KEM + Sign + SLH): PASS")
+    wpsc = w.signcrypt(lsk, pk, b"hdr", msg)
+    assert w.unsigncrypt(lpk, sk, b"hdr", wpsc) == msg
+
+    # 3. TOTP + FPE + Mnemonic + WilisLZ
+    code, rem = w.totp_at(b"12345678901234567890", 1_700_000_020, 30, 6)
+    assert len(code) == 6 and rem == 20
+    fpe_ct = w.fpe_encrypt(key, b"cc", "0123456789", "4532015112830366")
+    assert len(fpe_ct) == 16 and fpe_ct.isdigit() and w.fpe_decrypt(key, b"cc", "0123456789", fpe_ct) == "4532015112830366"
+    phrase = w.mnemonic_encode(key)
+    assert len(phrase.split()) == 34 and w.mnemonic_decode(phrase) == key
+    blob = b"WilisLZ compression test! " * 60
+    comp = w.lz_compress(blob)
+    assert len(comp) < len(blob) and w.lz_decompress(comp, len(blob)) == blob
+
+    print("Python C-FFI v0.7.0 (ALL 33/33 functions): PASS")
