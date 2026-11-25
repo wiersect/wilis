@@ -42,7 +42,7 @@ jobs:
       - name: Build optimized release binary & C-FFI shared library
         run: cargo build --release
 
-      - name: Run scientific cryptanalysis audit & benchmark
+      - name: Run 8-part scientific cryptanalysis audit & benchmark
         shell: bash
         run: |
           if [ -f ./target/release/wilis.exe ]; then
@@ -69,6 +69,21 @@ jobs:
               assert(wilis_kem_encapsulate(pk, ct, ss1) == WILIS_OK);
               assert(wilis_kem_decapsulate(sk, ct, ss2) == WILIS_OK);
               assert(memcmp(ss1, ss2, WILIS_KEM_SS_BYTES) == 0);
+
+              uint8_t key[WILIS_KEY_BYTES] = {7};
+              const uint8_t msg[] = "wilis-v0.6.0-siv-c99";
+              uint8_t siv_ct[sizeof(msg)], siv_pt[sizeof(msg)], siv_tag[WILIS_SIV_TAG_BYTES];
+              assert(wilis_siv_seal(key, NULL, 0, msg, sizeof(msg), siv_ct, siv_tag) == WILIS_OK);
+              assert(wilis_siv_open(key, NULL, 0, siv_ct, sizeof(msg), siv_tag, siv_pt) == WILIS_OK);
+              assert(memcmp(msg, siv_pt, sizeof(msg)) == 0);
+
+              uint8_t th[WILIS_HASH_BYTES];
+              assert(wilis_tree_hash_256(msg, sizeof(msg), th) == WILIS_OK);
+
+              uint8_t lpk[WILIS_SLH_PK_BYTES], lsk[WILIS_SLH_SK_BYTES], lsig[WILIS_SLH_SIG_BYTES];
+              assert(wilis_slh_keygen(lpk, lsk) == WILIS_OK);
+              assert(wilis_slh_sign(lsk, msg, sizeof(msg), lsig) == WILIS_OK);
+              assert(wilis_slh_verify(lpk, msg, sizeof(msg), lsig) == WILIS_OK);
               return 0;
           }
           EOF
@@ -83,3 +98,22 @@ jobs:
           else
             python -B bindings/python/wilis_py.py
           fi
+
+  miri:
+    name: Miri — Undefined Behavior Check (Pure-Rust Unsafe Paths)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly with Miri component
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Run Miri on pure-Rust cryptographic core, AEAD, KDF, Hash, Shamir & zeroize paths
+        env:
+          RUSTFLAGS: ""
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+        run: |
+          cargo miri test --test permutation_props --test aead_security --test shamir_split --test kdf_and_hash

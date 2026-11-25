@@ -17,7 +17,7 @@ use crate::error::{Result, WilisError};
 use crate::hash::WilisHash;
 use crate::kem::{
     decapsulate, encapsulate, keygen, KemCiphertext, KemPublicKey, KemSecretKey, KEM_CT_BYTES,
-    KEM_PK_BYTES,
+    KEM_PK_BYTES, KEM_SK_BYTES,
 };
 use crate::mac::{mac, verify_mac};
 use crate::ratchet::session::{RatchetPacket, RatchetSession};
@@ -328,6 +328,135 @@ impl PqRatchetSession {
     /// Returns the current Post-Compromise Security (PCS) ratchet epoch.
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Returns `true` if this side initiated the session.
+    pub fn is_initiator(&self) -> bool {
+        self.is_initiator
+    }
+
+    /// Returns the number of outgoing messages sent in the current epoch.
+    pub fn send_count(&self) -> u64 {
+        self.inner.send_count()
+    }
+
+    /// Returns the expected next incoming message counter in the current epoch.
+    pub fn recv_count(&self) -> u64 {
+        self.inner.recv_count()
+    }
+
+    /// Bootstraps a [`PqRatchetSession`] from an already-authenticated 256-bit shared secret
+    /// (such as `WilisPAKE`) plus exchanged ephemeral `WilisKEM` keys for full PCS rekeying.
+    pub fn from_bootstrap(
+        shared_secret: &[u8; KEY_BYTES],
+        context: &[u8],
+        is_initiator: bool,
+        local_kem_sk: KemSecretKey,
+        peer_kem_pk: KemPublicKey,
+    ) -> Self {
+        let mut h = WilisHash::new();
+        h.update(b"WPQS_BOOT_V1");
+        h.update(&(context.len() as u64).to_le_bytes());
+        h.update(context);
+        let ctx_hash = h.finalize();
+        let (root_key, mut sess_secret) = derive_initial_root_and_session(shared_secret, &ctx_hash);
+        let inner = RatchetSession::from_shared_secret(&sess_secret, is_initiator);
+        zeroize_bytes(&mut sess_secret);
+        Self {
+            root_key,
+            epoch: 0,
+            is_initiator,
+            local_kem_sk,
+            peer_kem_pk,
+            inner,
+        }
+    }
+
+    /// Serializes the sensitive `PqRatchetSession` state (`WPQS` v1).
+    /// Callers MUST encrypt at rest (e.g., via [`crate::ratchet::persist::seal_pq_session`])
+    /// and zeroize the returned buffer immediately after use.
+    pub fn to_state_bytes(&self) -> Vec<u8> {
+        let mut sk_bytes = self.local_kem_sk.to_bytes();
+        let pk_bytes = self.peer_kem_pk.to_bytes();
+        let mut inner_bytes = self.inner.to_state_bytes();
+
+        let cap = 4 + 1 + 1 + 8 + KEY_BYTES + sk_bytes.len() + pk_bytes.len() + 4 + inner_bytes.len();
+        let mut out = Vec::with_capacity(cap);
+        out.extend_from_slice(b"WPQS");
+        out.push(1u8);
+        out.push(if self.is_initiator { 1 } else { 0 });
+        out.extend_from_slice(&self.epoch.to_le_bytes());
+        out.extend_from_slice(&self.root_key);
+        out.extend_from_slice(&sk_bytes);
+        out.extend_from_slice(&pk_bytes);
+        out.extend_from_slice(&(inner_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&inner_bytes);
+
+        zeroize_bytes(&mut sk_bytes);
+        zeroize_bytes(&mut inner_bytes);
+        out
+    }
+
+    /// Deserializes a `WPQS` v1 state buffer produced by [`Self::to_state_bytes`].
+    pub fn from_state_bytes(data: &[u8]) -> Result<Self> {
+        let fixed = 4 + 1 + 1 + 8 + KEY_BYTES + KEM_SK_BYTES + KEM_PK_BYTES + 4;
+        if data.len() < fixed || &data[0..4] != b"WPQS" || data[4] != 1 {
+            return Err(WilisError::InvalidFormat(
+                "invalid or truncated WPQS ratchet session state".into(),
+            ));
+        }
+        let is_initiator = match data[5] {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(WilisError::InvalidFormat(
+                    "invalid role flag in WPQS ratchet state".into(),
+                ));
+            }
+        };
+        let epoch = u64::from_le_bytes(data[6..14].try_into().expect("8 bytes"));
+        let mut root_key = [0u8; KEY_BYTES];
+        root_key.copy_from_slice(&data[14..46]);
+        let mut pos = 46;
+        let local_kem_sk = match KemSecretKey::from_bytes(&data[pos..pos + KEM_SK_BYTES]) {
+            Ok(sk) => sk,
+            Err(e) => {
+                zeroize_bytes(&mut root_key);
+                return Err(e);
+            }
+        };
+        pos += KEM_SK_BYTES;
+        let peer_kem_pk = match KemPublicKey::from_bytes(&data[pos..pos + KEM_PK_BYTES]) {
+            Ok(pk) => pk,
+            Err(e) => {
+                zeroize_bytes(&mut root_key);
+                return Err(e);
+            }
+        };
+        pos += KEM_PK_BYTES;
+        let inner_len = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("4 bytes")) as usize;
+        pos += 4;
+        if data.len() - pos != inner_len {
+            zeroize_bytes(&mut root_key);
+            return Err(WilisError::InvalidFormat(
+                "non-canonical inner state length in WPQS".into(),
+            ));
+        }
+        let inner = match RatchetSession::from_state_bytes(&data[pos..pos + inner_len]) {
+            Ok(s) => s,
+            Err(e) => {
+                zeroize_bytes(&mut root_key);
+                return Err(e);
+            }
+        };
+        Ok(Self {
+            root_key,
+            epoch,
+            is_initiator,
+            local_kem_sk,
+            peer_kem_pk,
+            inner,
+        })
     }
 
     /// Encrypts the next outgoing message within the current PCS epoch.

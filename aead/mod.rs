@@ -12,5 +12,7 @@ pub mod decrypt;
 pub mod encrypt;
 pub mod finalize;
 pub mod init;
+pub mod siv;
 
 pub use cipher::{open, seal};
+pub use siv::{siv_open, siv_seal, SIV_TAG_BYTES};

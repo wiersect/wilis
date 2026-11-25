@@ -393,6 +393,13 @@ pub fn decrypt_directory_with_key(
         zeroize_bytes(&mut decrypted);
         return Err(e);
     }
+    // Auto-dispatch WDIR v2 cleanly if archive was created with constant-memory WDIR v2
+    if decrypted.len() >= 5 && decrypted[0..4] == WDIR_MAGIC && decrypted[4] == 2 {
+        let unpack_res =
+            crate::archive::stream_dir::unpack_directory_v2(&mut Cursor::new(&decrypted), dest_dir);
+        zeroize_bytes(&mut decrypted);
+        return unpack_res;
+    }
     // Dry-run validate the entire archive before creating any files/dirs on disk
     let unpack_res = validate_wdir_buffer(&decrypted, dest_dir)
         .and_then(|_| unpack_directory(&mut Cursor::new(&decrypted), dest_dir));
@@ -420,6 +427,12 @@ pub fn decrypt_directory_with_passphrase(
     if let Err(e) = dec_res {
         zeroize_bytes(&mut decrypted);
         return Err(e);
+    }
+    if decrypted.len() >= 5 && decrypted[0..4] == WDIR_MAGIC && decrypted[4] == 2 {
+        let unpack_res =
+            crate::archive::stream_dir::unpack_directory_v2(&mut Cursor::new(&decrypted), dest_dir);
+        zeroize_bytes(&mut decrypted);
+        return unpack_res;
     }
     // Dry-run validate the entire archive before creating any files/dirs on disk
     let unpack_res = validate_wdir_buffer(&decrypted, dest_dir)

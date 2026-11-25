@@ -5,27 +5,40 @@
 
 use std::io::Cursor;
 
-use wilis::archive::unpack_directory;
+use wilis::archive::{unpack_directory, unpack_directory_v2};
 use wilis::format::{decrypt_with_key, decrypt_with_passphrase, ContainerHeader};
+use wilis::kdf::KdfParams;
 use wilis::kem::{
-    keygen, pub_decrypt, pub_decrypt_multi, KemCiphertext, KemPublicKey, KemSecretKey,
+    keygen, pub_decrypt, pub_decrypt_multi, unsigncrypt, KemCiphertext, KemPublicKey, KemSecretKey,
 };
-use wilis::ratchet::{HandshakeInit, PqMessagePacket, PqRekeyPacket, RatchetPacket};
-use wilis::sign::{Signature, SigningKey, VerifyingKey};
+use wilis::protocols::timelock::TimeLockPuzzle;
+use wilis::protocols::totp::decode_base32;
+use wilis::protocols::zkp::ZkpProof;
+use wilis::ratchet::{
+    open_pq_session, HandshakeInit, PqMessagePacket, PqRekeyPacket, RatchetPacket,
+};
+use wilis::sign::{
+    Signature, SigningKey, SlhPublicKey, SlhSecretKey, SlhSignature, VerifyingKey,
+};
 use wilis::split::{combine_shares, Share};
-use wilis::stream::decrypt_stream_with_key;
+use wilis::stream::{decrypt_stream_with_key, SeekableReader};
 use wilis::utils::armor::armor_decode;
 use wilis::utils::base64::decode_base64;
+use wilis::utils::compress::decompress;
 use wilis::utils::hex::decode_hex;
+use wilis::utils::keywrap::{unwrap_secret_key, Keyring};
+use wilis::utils::mnemonic::decode_mnemonic;
 use wilis::utils::padding::unpad_strict;
-use wilis::vault::Vault;
+use wilis::utils::stego::{stego_capacity_bytes, stego_extract};
+use wilis::vault::{open_deniable_container, Vault};
 use wilis::xof::WilisXof;
 
 #[test]
 fn all_parsers_are_panic_free_on_adversarial_and_fuzz_inputs() {
     let key = [0x11u8; 32];
     let (kem_sk, _) = keygen().unwrap();
-    let mut rng = WilisXof::new(b"wilis-fuzz-audit-v040");
+    let (_, slh_pk) = SlhSecretKey::generate().unwrap();
+    let mut rng = WilisXof::new(b"wilis-fuzz-audit-v060");
 
     // Structured adversarial corpus: empty, magic-only, max-integer headers, all-0x00, all-0xFF
     let mut corpus: Vec<Vec<u8>> = vec![
@@ -37,8 +50,21 @@ fn all_parsers_are_panic_free_on_adversarial_and_fuzz_inputs() {
         b"WILS\x01\x01\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec(),
         b"WILS\x02\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xFF\xFF\xFF\xFF".to_vec(),
         b"WDIR\x01\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec(),
+        b"WDIR\x02\x01\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec(),
         b"WVLT\x01\xFF\xFF\xFF\xFF".to_vec(),
         b"WSIG\x01\x06\x00\x00\x00\x00".to_vec(),
+        b"WLP1\x00\x00\x00".to_vec(),
+        b"WLS1\x00\x00\x00".to_vec(),
+        b"WLSG\x01\x00\x00".to_vec(),
+        b"WPSC\x01\x00\x00".to_vec(),
+        b"WTLK\x01\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec(),
+        b"WZKP\x01\x00".to_vec(),
+        b"WENC\x01WILS".to_vec(),
+        b"WKRN\x01\xFF\xFF\xFF\xFF".to_vec(),
+        b"WLZ1\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec(),
+        b"WSEK\x01\x00\x00\x04\x00\x00\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF".to_vec(),
+        b"WRST\x01WILS".to_vec(),
+        b"BM\x36\x00\x00\x00\x00\x00\x00\x00\x36\x00\x00\x00\x28\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x18\x00\x00\x00\x00\x00".to_vec(),
         b"WSHR\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".to_vec(),
         b"WPKE\x01".to_vec(),
         b"WPKE\x02\x40\x00\x04\x00\x00".to_vec(),
@@ -65,9 +91,24 @@ fn all_parsers_are_panic_free_on_adversarial_and_fuzz_inputs() {
         let _ = Signature::from_bytes(data);
         let _ = SigningKey::from_bytes(data);
         let _ = VerifyingKey::from_bytes(data);
+        let _ = SlhPublicKey::from_bytes(data);
+        let _ = SlhSecretKey::from_bytes(data);
+        let _ = SlhSignature::from_bytes(data);
+        let _ = unsigncrypt(&slh_pk, &kem_sk, data, b"");
+        let _ = TimeLockPuzzle::from_bytes(data);
+        let _ = ZkpProof::from_bytes(data);
+        let _ = unwrap_secret_key(data, b"pass", None);
+        let _ = Keyring::from_bytes(data);
+        let _ = decompress(data, 65_536);
+        let _ = SeekableReader::open_with_key(Cursor::new(data), &key, b"");
+        let _ = open_pq_session(data, b"pass", None);
+        let _ = stego_capacity_bytes(data);
+        let _ = stego_extract(data, &key);
+        let _ = open_deniable_container(data, b"pass", KdfParams::FAST_TEST);
         let _ = Share::from_bytes(data);
         let _ = Vault::from_bytes(data);
         let _ = unpack_directory(&mut Cursor::new(data), &tmp_dir);
+        let _ = unpack_directory_v2(&mut Cursor::new(data), &tmp_dir);
         let _ = KemPublicKey::from_bytes(data);
         let _ = KemSecretKey::from_bytes(data);
         let _ = KemCiphertext::from_bytes(data);
@@ -81,7 +122,9 @@ fn all_parsers_are_panic_free_on_adversarial_and_fuzz_inputs() {
 
         if let Ok(as_str) = core::str::from_utf8(data) {
             let _ = decode_base64(as_str);
+            let _ = decode_base32(as_str);
             let _ = decode_hex(as_str);
+            let _ = decode_mnemonic(as_str);
             let _ = Share::decode_string(as_str);
             let _ = armor_decode(as_str, None);
         }

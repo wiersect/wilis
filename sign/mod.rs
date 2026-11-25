@@ -10,9 +10,13 @@
 
 pub mod keypair;
 pub mod merkle;
+pub mod stateless;
 pub mod wots;
 
 pub use keypair::{
     Signature, SigningKey, VerifyingKey, DEFAULT_TREE_HEIGHT, MAX_TREE_HEIGHT, MIN_TREE_HEIGHT,
     SIGN_PK_BYTES, SIGN_SK_BYTES, SIG_VERSION_V1, SIG_VERSION_V2,
+};
+pub use stateless::{
+    SlhPublicKey, SlhSecretKey, SlhSignature, SLH_PK_BYTES, SLH_SIG_BYTES, SLH_SK_BYTES,
 };

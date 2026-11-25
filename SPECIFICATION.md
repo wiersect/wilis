@@ -1,4 +1,4 @@
-# Wilis Cryptographic Specification (v0.5.0)
+# Wilis Cryptographic Specification (v0.6.0)
 
 This document defines the exact mathematical construction and binary container wire formats of the **Wilis** cryptographic suite.
 
@@ -215,3 +215,22 @@ Built exclusively from `WilisHash-256` (`n = 32` bytes), without relying on fact
 
 - **`WilisPad` (`WPAD` v1):** Frames plaintext as `[ "WPAD": 4B ][ pt_len: u64 LE ][ plaintext ][ 0x80 ][ 0x00 ... ]` rounded up to an exact multiple of `block_size` (`16..=65536` bytes). `unpad_strict` verifies the `0x80` sentinel and every trailing zero byte in constant time.
 - **`WilisArmor`:** PEM-style ASCII armor (`-----BEGIN <LABEL>-----` ... `-----END <LABEL>-----`) with 64-character canonical RFC 4648 Base64 wrapping and a trailing `=<4-char Base64>` 24-bit `WilisHash-256("WARM_CHK_V1" || |label| || label || |data| || data)` integrity checksum verified in constant time.
+
+---
+
+## 13. v0.6.0 Engine Acceleration, Stateless PQ Signatures & Extended Formats
+
+- **Constant-Time NTT (`kem/ntt.rs`):** Twisted Cooley-Tukey `O(N log N)` negacyclic multiplication over $R_q = \mathbb{Z}_{7681}[X]/(X^{256}+1)$ using primitive 512-th root $\psi = 62$ ($\psi^{256} \equiv -1 \pmod{7681}$, $\omega = 3844$, $N^{-1} = 7651$) and branchless Barrett reduction (`BARRETT_M32 = floor(2^32 / 7681)`), bit-exact with schoolbook multiplication.
+- **Hardware 4-Way SIMD (`core/simd.rs`):** Runtime-dispatched x86_64 AVX2 (4-way 256-bit) and AArch64 NEON (2-way 128-bit) parallel `WilisPerm-384` execution bit-exact with scalar `permute`.
+- **Nonce-Misuse-Resistant AEAD (`WilisAEAD-SIV` — `aead/siv.rs`):** Two-pass synthetic IV mode deriving `(K_siv, K_enc)` subkeys, computing 256-bit `siv = WilisMAC(K_siv, "WSIV_SIV_V1:" || nonce || |aad| || aad || |pt| || pt)`, and sealing with `WilisAEAD(K_enc, siv[0..24])`, producing a 64-byte `[siv || aead_tag]`.
+- **Parallel Merkle Hash (`WilisTreeHash` — `hash/tree_hash.rs`):** Multi-core 4 KiB chunk Merkle tree (`WTRE_LF1`/`WTRE_ND1`/`WTRE_RT1`) supporting `O(log N)` verified chunk inclusion proofs (`TreeProof`).
+- **Parallel Multi-Lane KDF (`WilisKDF` v3 — `kdf/parallel_kdf.rs`):** `1..=16` parallel memory-hard lanes synchronized via deterministic neighbor-state cross-lane folding barriers after every pass.
+- **Stateless Post-Quantum Signatures (`WilisSLH` — `sign/stateless.rs`):** Unlimited-use hedged FORS (`K=16, A=6`) + 2-layer WOTS+ hypertree (`H'=4`) with wire formats `WLP1` (`100` B), `WLS1` (`164` B), `WLSG` (`8,165` B).
+- **Post-Quantum Signcryption (`WPSC` v1 — `kem/signcrypt.rs`):** Atomic Encrypt-then-Sign-and-Bind combining `WilisKEM` + `WilisSLH` + `WilisAEAD` binding both `sender_pk` and `recipient_pk` to prevent surreptitious forwarding.
+- **Advanced Protocols (`protocols/`):** `WilisTOTP` (RFC 4226/6238 on `WilisMAC-256` + RFC 4648 Base32), `WilisFPE` (10-round Feistel over radix `2..=256`), `WilisVSS` (blinded Merkle shares + $g(0)=0$ proactive share refresh), `WilisZKP` (`WZKP` v1 single-use 64-round Fiat-Shamir hash Sigma proof), `WilisTimeLock` (`WTLK` v1 sequential $P^T$ delay puzzle), and `WilisPAKE` (password-masked `WilisKEM` with 3-message mutual key confirmation).
+- **Extended Wire Containers:**
+  - `WSEK` v1 (`stream/seekable.rs`): Fixed-stride `O(1)` random-access seekable encrypted container.
+  - `WDIR` v2 (`archive/stream_dir.rs`): Pull-based constant-memory streaming directory archive with empty directory entries, Unix executable bit preservation, and optional `WLZ1` (`WilisLZ`) per-file compression.
+  - `WENC` v1 & `WKRN` v1 (`utils/keywrap.rs`): Passphrase-protected secret key envelope & checksummed public-key keyring with expiration/revocation.
+  - `WRST` v1 (`ratchet/persist.rs`) & `WNET` v1 (`net/channel.rs`): Encrypted persistent `PqRatchetSession` state & post-quantum encrypted framed TCP transport (`PKI` & `PAKE` modes + auto `WPRK` PCS rekeying every 32 messages).
+  - `WilisHidden` (`vault/deniable.rs`) & `WilisStego` (`utils/stego.rs`): Zero-header CSPRNG dual-passphrase plausible-deniability volumes (single-KDF constant-effort unlock) & keyed Fisher-Yates scattered LSB embedding in 24/32-bit BMP and 16-bit PCM WAV.

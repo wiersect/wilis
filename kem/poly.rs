@@ -72,12 +72,17 @@ impl Poly {
         out
     }
 
-    /// Exact constant-time negacyclic polynomial multiplication modulo `(X^256 + 1, q)`.
-    ///
-    /// Uses `i64` accumulators (max magnitude `256 * 7680^2 = 15,099,494,400 < 2^34`)
-    /// reduced via division-free, branchless Barrett reduction so no secret-dependent
-    /// hardware division or branch timing can leak secret polynomials.
+    /// Exact constant-time negacyclic polynomial multiplication modulo `(X^256 + 1, q)`
+    /// powered by `O(N log N)` branchless Barrett NTT ([`crate::kem::ntt::poly_mul_ntt`]).
     pub fn mul(&self, rhs: &Self) -> Self {
+        Self {
+            coeffs: crate::kem::ntt::poly_mul_ntt(&self.coeffs, &rhs.coeffs),
+        }
+    }
+
+    /// Reference `O(N^2)` schoolbook negacyclic multiplication with branchless Barrett reduction
+    /// (retained for mathematical cross-verification against the `O(N log N)` NTT implementation).
+    pub fn mul_schoolbook(&self, rhs: &Self) -> Self {
         let mut acc = [0i64; KEM_N];
         for i in 0..KEM_N {
             let ai = self.coeffs[i] as i64;

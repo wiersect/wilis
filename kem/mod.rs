@@ -12,7 +12,9 @@
 pub mod hybrid;
 pub mod mlwe;
 pub mod multi;
+pub mod ntt;
 pub mod poly;
+pub mod signcrypt;
 
 pub use hybrid::{pub_decrypt, pub_encrypt};
 pub use mlwe::{
@@ -23,3 +25,4 @@ pub use multi::{
     pub_decrypt_multi, pub_decrypt_multi_stream, pub_encrypt_multi, pub_encrypt_multi_stream,
     MAX_WPKE_RECIPIENTS, WPKE_SLOT_BYTES, WPKE_VERSION_V2,
 };
+pub use signcrypt::{signcrypt, unsigncrypt};

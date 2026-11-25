@@ -5,12 +5,18 @@ use std::time::Instant;
 use crate::aead::{open, seal};
 use crate::core::constants::{ROUNDS_FULL, STATE_WORDS};
 use crate::core::permute::{permute, permute_inverse};
+use crate::core::simd::active_simd_backend;
 use crate::core::state::State;
 use crate::error::{Result, WilisError};
+use crate::kem::{decapsulate, encapsulate, keygen};
 
-/// Runs a live diagnostic checking bijectivity, avalanche diffusion, and AEAD throughput.
+/// Runs a live diagnostic checking bijectivity, avalanche, AEAD throughput, and NTT-accelerated KEM speed.
 pub fn run_bench() -> Result<()> {
-    println!("=== Wilis Self-Test & Benchmark ===");
+    println!(
+        "=== Wilis v{} Self-Test & Benchmark (SIMD backend: {}) ===",
+        env!("CARGO_PKG_VERSION"),
+        active_simd_backend()
+    );
 
     // 1. Bijectivity check
     let original = State::from_words([
@@ -26,7 +32,7 @@ pub fn run_bench() -> Result<()> {
     permute_inverse(&mut s, ROUNDS_FULL);
     let bijective = s == original;
     println!(
-        "[1/3] Bijectivity P^-1(P(x)) == x : {}",
+        "[1/4] Bijectivity P^-1(P(x)) == x : {}",
         if bijective { "PASS" } else { "FAIL" }
     );
     if !bijective {
@@ -60,7 +66,7 @@ pub fn run_bench() -> Result<()> {
     let avg_bits = total_flipped as f64 / 384.0;
     let avg_pct = (avg_bits / 384.0) * 100.0;
     println!(
-        "[2/3] Avalanche (384 1-bit flips) : avg {:.2}/384 bits ({:.2}%), range [{}..{}]",
+        "[2/4] Avalanche (384 1-bit flips) : avg {:.2}/384 bits ({:.2}%), range [{}..{}]",
         avg_bits, avg_pct, min_flipped, max_flipped
     );
 
@@ -82,9 +88,39 @@ pub fn run_bench() -> Result<()> {
     }
     let mib = payload.len() as f64 / (1024.0 * 1024.0);
     println!(
-        "[3/3] WilisAEAD Throughput      : seal {:.2} MiB/s | open {:.2} MiB/s",
+        "[3/4] WilisAEAD Throughput      : seal {:.2} MiB/s | open {:.2} MiB/s",
         mib / enc_secs.max(1e-9),
         mib / dec_secs.max(1e-9)
+    );
+
+    // 4. NTT-accelerated WilisKEM throughput (100 ops)
+    const KEM_ITERS: u32 = 100;
+    let tk0 = Instant::now();
+    let (sk, pk) = keygen()?;
+    for _ in 1..KEM_ITERS {
+        let _ = keygen()?;
+    }
+    let kg_ops = KEM_ITERS as f64 / tk0.elapsed().as_secs_f64().max(1e-9);
+
+    let tk1 = Instant::now();
+    let (kem_ct, ss1) = encapsulate(&pk)?;
+    for _ in 1..KEM_ITERS {
+        let _ = encapsulate(&pk)?;
+    }
+    let enc_ops = KEM_ITERS as f64 / tk1.elapsed().as_secs_f64().max(1e-9);
+
+    let tk2 = Instant::now();
+    let ss2 = decapsulate(&sk, &kem_ct);
+    for _ in 1..KEM_ITERS {
+        let _ = decapsulate(&sk, &kem_ct);
+    }
+    let dec_ops = KEM_ITERS as f64 / tk2.elapsed().as_secs_f64().max(1e-9);
+    if ss1.as_bytes() != ss2.as_bytes() {
+        return Err(WilisError::AuthenticationFailed);
+    }
+    println!(
+        "[4/4] WilisKEM (NTT mod 7681)   : keygen {:.0} ops/s | encap {:.0} ops/s | decap {:.0} ops/s",
+        kg_ops, enc_ops, dec_ops
     );
 
     Ok(())

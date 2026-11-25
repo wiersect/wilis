@@ -8,7 +8,9 @@ pub mod constants;
 pub mod diffusion;
 pub mod permute;
 pub mod sbox;
+pub mod simd;
 pub mod state;
 
 pub use permute::{permute, permute_inverse};
+pub use simd::{active_simd_backend, permute_4x};
 pub use state::State;

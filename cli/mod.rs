@@ -1,10 +1,12 @@
-//! Zero-dependency command-line interface for Wilis v0.5.0.
+//! Zero-dependency command-line interface for Wilis v0.6.0.
 
 pub mod args;
 pub mod audit_cmd;
 pub mod bench_cmd;
 pub mod dir_cmd;
+pub mod extra_cmd;
 pub mod file_cmd;
+pub mod inspect_cmd;
 pub mod kem_cmd;
 pub mod keygen_cmd;
 pub mod mac_cmd;
@@ -59,7 +61,8 @@ pub fn run(raw_args: &[String]) -> Result<()> {
             aad,
             dir_path,
             output_file,
-        } => dir_cmd::run_encrypt_dir(auth, &aad, &dir_path, &output_file),
+            compress,
+        } => dir_cmd::run_encrypt_dir(auth, &aad, &dir_path, &output_file, compress),
         Command::DecryptDir {
             auth,
             aad,
@@ -98,6 +101,18 @@ pub fn run(raw_args: &[String]) -> Result<()> {
             input_path,
             sig_path,
         } => sign_cmd::run_verify_file(&pk_path, &input_path, &sig_path),
+        Command::SlhKeygen { out_prefix } => extra_cmd::run_slh_keygen(&out_prefix),
+        Command::SlhSign {
+            sk_path,
+            input_path,
+            sig_out_path,
+            armor,
+        } => extra_cmd::run_slh_sign(&sk_path, &input_path, &sig_out_path, armor),
+        Command::SlhVerify {
+            pk_path,
+            input_path,
+            sig_path,
+        } => extra_cmd::run_slh_verify(&pk_path, &input_path, &sig_path),
         Command::SplitKey {
             mut secret_hex,
             total,
@@ -128,6 +143,66 @@ pub fn run(raw_args: &[String]) -> Result<()> {
             text,
         } => mac_cmd::run_mac_verify(key, &tag_hex, file_path.as_deref(), text.as_deref()),
         Command::Rand { bytes } => mac_cmd::run_rand(bytes),
+        Command::Passgen {
+            mode,
+            length,
+            count,
+        } => extra_cmd::run_passgen(mode, length, count),
+        Command::MnemonicEncode { key_hex } => extra_cmd::run_mnemonic_encode(key_hex.as_str()),
+        Command::MnemonicDecode { phrase } => extra_cmd::run_mnemonic_decode(phrase.as_str()),
+        Command::KeyProtect {
+            in_path,
+            out_path,
+            auth,
+        } => extra_cmd::run_key_protect(&in_path, &out_path, auth),
+        Command::KeyUnlock {
+            in_path,
+            out_path,
+            auth,
+        } => extra_cmd::run_key_unlock(&in_path, &out_path, auth),
+        Command::Keyring { file_path, action } => extra_cmd::run_keyring(&file_path, action),
+        Command::Stego { action } => extra_cmd::run_stego(action),
+        Command::HiddenCreate {
+            out_file,
+            size,
+            decoy_pass,
+            decoy_in,
+            hidden_pass,
+            hidden_in,
+            strength,
+        } => extra_cmd::run_hidden_create(
+            &out_file,
+            size,
+            decoy_pass.as_str(),
+            &decoy_in,
+            hidden_pass.as_str(),
+            &hidden_in,
+            strength,
+        ),
+        Command::HiddenOpen {
+            in_file,
+            out_file,
+            pass,
+            strength,
+        } => extra_cmd::run_hidden_open(&in_file, &out_file, pass.as_str(), strength),
+        Command::Send {
+            addr,
+            file_path,
+            mode,
+        } => extra_cmd::run_send(&addr, &file_path, mode),
+        Command::Recv {
+            listen_addr,
+            out_dir,
+            mode,
+        } => extra_cmd::run_recv(&listen_addr, &out_dir, mode),
+        Command::Ratchet {
+            state_path,
+            auth,
+            action,
+        } => extra_cmd::run_ratchet(&state_path, auth, action),
+        Command::Inspect { path } => inspect_cmd::run_inspect(&path),
+        Command::Shred { path, passes } => extra_cmd::run_shred(&path, passes),
+        Command::Completions { shell } => extra_cmd::run_completions(&shell),
         Command::Keygen => keygen_cmd::run_keygen(),
         Command::HashText { text } => keygen_cmd::run_hash_text(&text),
         Command::HashFile { path } => keygen_cmd::run_hash_file(&path),

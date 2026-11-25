@@ -9,7 +9,12 @@
 pub mod chunk_nonce;
 pub mod decrypt_stream;
 pub mod encrypt_stream;
+pub mod seekable;
 
 pub use chunk_nonce::DEFAULT_CHUNK_SIZE;
 pub use decrypt_stream::{decrypt_stream_with_key, decrypt_stream_with_passphrase};
 pub use encrypt_stream::{encrypt_stream_with_key, encrypt_stream_with_passphrase};
+pub use seekable::{
+    encrypt_seekable_with_key, encrypt_seekable_with_passphrase, SeekableReader, WSEK_MAGIC,
+    WSEK_VERSION,
+};

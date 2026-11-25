@@ -230,6 +230,94 @@ impl RatchetSession {
     pub fn send_count(&self) -> u64 {
         self.send_counter
     }
+
+    /// Returns the expected next incoming message counter.
+    pub fn recv_count(&self) -> u64 {
+        self.recv_counter
+    }
+
+    /// Serializes the full sensitive symmetric ratchet state (caller MUST encrypt & zeroize).
+    pub(crate) fn to_state_bytes(&self) -> Vec<u8> {
+        let cap = KEY_BYTES * 2 + 8 + 8 + 4 + self.skipped.len() * (8 + KEY_BYTES + NONCE_BYTES);
+        let mut out = Vec::with_capacity(cap);
+        out.extend_from_slice(&self.send_chain);
+        out.extend_from_slice(&self.recv_chain);
+        out.extend_from_slice(&self.send_counter.to_le_bytes());
+        out.extend_from_slice(&self.recv_counter.to_le_bytes());
+        out.extend_from_slice(&(self.skipped.len() as u32).to_le_bytes());
+        for (&counter, mk) in &self.skipped {
+            out.extend_from_slice(&counter.to_le_bytes());
+            out.extend_from_slice(mk.key.as_bytes());
+            out.extend_from_slice(&mk.nonce);
+        }
+        out
+    }
+
+    /// Deserializes a symmetric ratchet state produced by [`Self::to_state_bytes`].
+    pub(crate) fn from_state_bytes(data: &[u8]) -> Result<Self> {
+        let fixed = KEY_BYTES * 2 + 8 + 8 + 4;
+        if data.len() < fixed {
+            return Err(WilisError::InvalidFormat(
+                "truncated inner ratchet session state".into(),
+            ));
+        }
+        let mut send_chain = [0u8; KEY_BYTES];
+        let mut recv_chain = [0u8; KEY_BYTES];
+        send_chain.copy_from_slice(&data[0..KEY_BYTES]);
+        recv_chain.copy_from_slice(&data[KEY_BYTES..KEY_BYTES * 2]);
+        let send_counter = u64::from_le_bytes(data[64..72].try_into().expect("8 bytes"));
+        let recv_counter = u64::from_le_bytes(data[72..80].try_into().expect("8 bytes"));
+        let skipped_len = u32::from_le_bytes(data[80..84].try_into().expect("4 bytes")) as usize;
+        if skipped_len > (MAX_SKIP_WINDOW as usize) * 2 {
+            zeroize_bytes(&mut send_chain);
+            zeroize_bytes(&mut recv_chain);
+            return Err(WilisError::InvalidFormat(
+                "ratchet skipped key cache exceeds safety window".into(),
+            ));
+        }
+        let entry_sz = 8 + KEY_BYTES + NONCE_BYTES;
+        let expected_len = fixed + skipped_len * entry_sz;
+        if data.len() != expected_len {
+            zeroize_bytes(&mut send_chain);
+            zeroize_bytes(&mut recv_chain);
+            return Err(WilisError::InvalidFormat(
+                "non-canonical inner ratchet session state length".into(),
+            ));
+        }
+
+        let mut skipped = BTreeMap::new();
+        let mut pos = fixed;
+        for _ in 0..skipped_len {
+            let counter = u64::from_le_bytes(data[pos..pos + 8].try_into().expect("8 bytes"));
+            pos += 8;
+            let mut k = [0u8; KEY_BYTES];
+            k.copy_from_slice(&data[pos..pos + KEY_BYTES]);
+            pos += KEY_BYTES;
+            let mut nonce = [0u8; NONCE_BYTES];
+            nonce.copy_from_slice(&data[pos..pos + NONCE_BYTES]);
+            pos += NONCE_BYTES;
+            let mk = MessageKeyMaterial {
+                key: SecretKey::from_bytes(k),
+                nonce,
+            };
+            zeroize_bytes(&mut k);
+            if skipped.insert(counter, mk).is_some() {
+                zeroize_bytes(&mut send_chain);
+                zeroize_bytes(&mut recv_chain);
+                return Err(WilisError::InvalidFormat(
+                    "duplicate skipped counter in ratchet state".into(),
+                ));
+            }
+        }
+
+        Ok(Self {
+            send_chain,
+            recv_chain,
+            send_counter,
+            recv_counter,
+            skipped,
+        })
+    }
 }
 
 impl Drop for RatchetSession {

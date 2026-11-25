@@ -10,7 +10,11 @@ use crate::format::{
     KeyMode,
 };
 use crate::kdf::KdfParams;
+use crate::protocols::totp::{decode_base32, generate_totp_at, generate_totp_now};
+use crate::utils::armor::{armor_decode, armor_encode};
 use crate::utils::zeroize::{read_bounded_file, write_secret_file, zeroize_bytes};
+
+const VAULT_ARMOR_LABEL: &str = "WILIS VAULT";
 
 const VAULT_MAGIC: [u8; 4] = *b"WVLT";
 const VAULT_VERSION: u8 = 1;
@@ -88,6 +92,100 @@ impl Vault {
     /// Lists all secret names in sorted order.
     pub fn list_names(&self) -> Vec<&str> {
         self.entries.keys().map(|k| k.as_str()).collect()
+    }
+
+    /// Searches secret names by case-insensitive substring (never exposes values).
+    pub fn search(&self, query: &str) -> Vec<&str> {
+        let q = query.to_ascii_lowercase();
+        self.entries
+            .keys()
+            .filter(|k| k.to_ascii_lowercase().contains(&q))
+            .map(|k| k.as_str())
+            .collect()
+    }
+
+    /// Iterates over all `(name, value)` pairs in deterministic sorted order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    /// Merges all entries from `other` into `self` (updating existing names).
+    pub fn merge_from(&mut self, other: &Vault) -> Result<usize> {
+        let mut count = 0usize;
+        for (k, v) in other.iter() {
+            self.set(k, v)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Extracts a Base32 TOTP secret stored at `name` (supporting raw Base32 or `otpauth://...secret=...`
+    /// URIs) and computes `(code, seconds_remaining)` at `unix_secs`.
+    pub fn totp_at(
+        &self,
+        name: &str,
+        unix_secs: u64,
+        period: u64,
+        digits: u32,
+    ) -> Result<(String, u64)> {
+        let raw_val = self.get(name).ok_or_else(|| {
+            WilisError::InvalidFormat(format!("secret '{name}' not found in vault"))
+        })?;
+        let b32 = extract_totp_secret_field(raw_val);
+        let mut secret = decode_base32(b32)?;
+        let res = generate_totp_at(&secret, unix_secs, period, digits);
+        zeroize_bytes(&mut secret);
+        res
+    }
+
+    /// Computes the current wall-clock `WilisTOTP` code `(code, seconds_remaining)` for `name`.
+    pub fn totp_now(&self, name: &str, period: u64, digits: u32) -> Result<(String, u64)> {
+        let raw_val = self.get(name).ok_or_else(|| {
+            WilisError::InvalidFormat(format!("secret '{name}' not found in vault"))
+        })?;
+        let b32 = extract_totp_secret_field(raw_val);
+        let mut secret = decode_base32(b32)?;
+        let res = generate_totp_now(&secret, period, digits);
+        zeroize_bytes(&mut secret);
+        res
+    }
+
+    /// Exports the vault as an authenticated ASCII-armored (`WILIS VAULT`) encrypted backup.
+    pub fn export_armored(
+        &self,
+        passphrase: &[u8],
+        keyfile_hash: Option<&[u8; HASH_BYTES]>,
+        params: KdfParams,
+    ) -> Result<String> {
+        let mut raw = self.to_bytes();
+        let enc_res = encrypt_with_passphrase_and_keyfile(
+            passphrase,
+            keyfile_hash,
+            &raw,
+            VAULT_AAD,
+            params,
+        );
+        zeroize_bytes(&mut raw);
+        let encrypted = enc_res?;
+        armor_encode(VAULT_ARMOR_LABEL, &encrypted)
+    }
+
+    /// Authenticates, decrypts, and imports a vault from an ASCII-armored (`WILIS VAULT`) backup.
+    pub fn import_armored(
+        armored: &str,
+        passphrase: &[u8],
+        keyfile_hash: Option<&[u8; HASH_BYTES]>,
+    ) -> Result<Self> {
+        let (_, encrypted) = armor_decode(armored, Some(VAULT_ARMOR_LABEL))?;
+        let mut raw = decrypt_with_passphrase_and_keyfile(
+            passphrase,
+            keyfile_hash,
+            &encrypted,
+            VAULT_AAD,
+        )?;
+        let res = Self::from_bytes(&raw);
+        zeroize_bytes(&mut raw);
+        res
     }
 
     /// Returns the number of stored secrets.
@@ -240,6 +338,21 @@ impl Vault {
     ) -> Result<Self> {
         Self::load_encrypted_with_params(path, passphrase, keyfile_hash).map(|(v, _)| v)
     }
+}
+
+fn extract_totp_secret_field(val: &str) -> &str {
+    let trimmed = val.trim();
+    if let Some(q_idx) = trimmed.find('?') {
+        let query = &trimmed[q_idx + 1..];
+        for pair in query.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                if k.eq_ignore_ascii_case("secret") {
+                    return v;
+                }
+            }
+        }
+    }
+    trimmed
 }
 
 impl Drop for Vault {

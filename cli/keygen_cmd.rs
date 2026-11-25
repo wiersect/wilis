@@ -28,23 +28,39 @@ pub fn run_hash_text(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Streams a file through `WilisHash-256` and prints its hex digest.
+/// Streams a file (or stdin when `path == "-"`) through `WilisHash-256` and prints its hex digest.
 pub fn run_hash_file(path: &str) -> Result<()> {
-    let mut file = File::open(path)?;
     let mut hasher = WilisHash::new();
     let mut buf = [0u8; 64 * 1024];
 
     let read_res = (|| -> Result<()> {
-        loop {
-            let n = match file.read(&mut buf) {
-                Ok(n) => n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e.into()),
-            };
-            if n == 0 {
-                break;
+        if path == "-" {
+            let stdin = std::io::stdin();
+            let mut reader = stdin.lock();
+            loop {
+                let n = match reader.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
             }
-            hasher.update(&buf[..n]);
+        } else {
+            let mut file = File::open(path)?;
+            loop {
+                let n = match file.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
         }
         Ok(())
     })();

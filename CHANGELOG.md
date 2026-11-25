@@ -2,6 +2,37 @@
 
 All notable changes to **Wilis** are documented in this file.
 
+## [0.6.0] - 2026-11-25
+
+### Major Platform Release — NTT/SIMD Acceleration, SIV, TreeHash, Parallel KDF, Stateless `WilisSLH`, Signcryption, 6 Crypto Protocols, `WilisNet` PQ TCP, Seekable/Streaming v2 Containers, OS Hardening, Multi-Language Bindings & 8-Part Audit
+Preserves **zero external Rust dependencies** (`[dependencies]` empty) and 100% wire compatibility with all `v0.4.x`–`v0.5.0` containers, keys, signatures, and locked KAT vectors.
+
+- **Cryptographic Core & Performance (`kem/ntt.rs`, `core/simd.rs`, `aead/siv.rs`, `hash/tree_hash.rs`, `kdf/parallel_kdf.rs`)**:
+  - Constant-time `O(N log N)` twisted Cooley-Tukey **NTT mod `q = 7681`** with branchless Barrett reduction integrated into `WilisKEM` (`Poly::mul`), bit-exact with schoolbook multiplication.
+  - Runtime-dispatched hardware **4-way AVX2 (x86_64) & 2-way NEON (AArch64) SIMD** `permute_4x` with bit-exact scalar fallback.
+  - Nonce-Misuse-Resistant **`WilisAEAD-SIV`** (`siv_seal`/`siv_open`, 64-byte synthetic tag).
+  - Multi-core **`WilisTreeHash`** parallel Merkle hash + `O(log N)` chunk inclusion proofs (`TreeProof`).
+  - Multi-lane parallel **`WilisKDF` v3** (`1..=16` lanes with deterministic cross-lane folding barriers & full scratchpad zeroization).
+- **Post-Quantum Signatures, Signcryption & 6 Cryptographic Protocols (`sign/stateless.rs`, `kem/signcrypt.rs`, `protocols/`)**:
+  - Stateless unlimited-use **`WilisSLH`** (FORS + 2-layer WOTS+ Hypertree; `WLP1`/`WLS1`/`WLSG` + CLI `slh-keygen`/`slh-sign`/`slh-verify`).
+  - Unified PQ Signcryption **`WPSC` v1** (`WilisKEM` + `WilisSLH` + `WilisAEAD`, anti-surreptitious-forwarding).
+  - **`WilisTOTP`** (RFC 4226/6238 on `WilisMAC-256` + RFC 4648 Base32), **`WilisFPE`** (unbiased 10-round Feistel over radix `2..=256`), **`WilisVSS`** (blinded Merkle shares + $g(0)=0$ proactive share refresh), **`WilisZKP`** (`WZKP` v1 single-use 64-round hash Sigma proof), **`WilisTimeLock`** (`WTLK` v1 sequential delay puzzle), and **`WilisPAKE`** (password-masked `WilisKEM` mutual key exchange).
+- **Storage, Containers, Hardening & Privacy (`utils/`, `stream/seekable.rs`, `archive/stream_dir.rs`, `vault/`)**:
+  - OS memory hardening (`RLIMIT_CORE = 0`, Linux `PR_SET_DUMPABLE = 0`, `mlock`/`VirtualLock` `LockedBuf`) and anti-TOCTOU multi-pass **`wilis shred`**.
+  - Pure-Rust lossless **`WilisLZ` (`WLZ1`)** compression with decompression-bomb ceiling protection.
+  - Random-access `O(1)` seekable encrypted container **`WSEK` v1** (`SeekableReader::read_at`).
+  - True constant-memory streaming **`WDIR` v2** directory archiver preserving empty directories, Unix executable bits, and optional per-file `WilisLZ` compression.
+  - UNIX stdin/stdout pipe (`--in -` / `--out -`) support across `encrypt-file`, `decrypt-file`, `hash`, and `mac`.
+  - **256-word phonetic mnemonic backup** (`wilis mnemonic`), **`WENC` v1 passphrase-protected secret keys** (`key-protect`/`key-unlock`), **`WKRN` v1 trusted keyring** with expiration & revocation (`keyring`), **Plausible Deniability Dual-Passphrase Hidden Volumes** (`wilis hidden`, single-KDF constant-effort unlock), and **Keyed-Scatter LSB Steganography** for 24/32-bit BMP & 16-bit PCM WAV (`wilis stego`).
+- **Networking, Persistent Ratchet, Vault Upgrades & DevEx (`net/channel.rs`, `ratchet/persist.rs`, `vault/store.rs`, `cli/`)**:
+  - **`WilisNet` (`wilis send` / `wilis recv`)**: Pure-`std::net` post-quantum encrypted framed TCP file transfer supporting both PKI (`WHSH`) and zero-PKI `WilisPAKE` modes with automatic `WPRK` PCS rekeying.
+  - **Persistent Encrypted PQ Ratchet (`WRST` v1 / `wilis ratchet`)** (`init`, `accept`, `encrypt`, `decrypt`, `rekey`, `apply-rekey`).
+  - **`WilisVault` upgrades**: `vault rekey`, `vault search`, `vault totp` (raw Base32 & `otpauth://`), `vault export` / `import --merge` (ASCII-armored `WILIS VAULT`).
+  - **`wilis inspect`**, **`wilis passgen`** (unbiased passwords & passphrases), and **`wilis completions`** (`bash`, `zsh`, `fish`, `powershell`).
+- **Expanded FFI, Multi-Language Bindings, 8-Part Audit & CI Miri (`ffi/`, `include/wilis.h`, `bindings/`, `audit/timing.rs`, `.github/workflows/ci.yml`)**:
+  - Exported `wilis_siv_seal`, `wilis_siv_open`, `wilis_tree_hash_256`, `wilis_slh_keygen`, `wilis_slh_sign`, `wilis_slh_verify` across C99 & Python 3, plus new **Go (`bindings/go/wilis.go`)** and **Node.js/TypeScript (`bindings/node/wilis.mjs` + `.d.ts`)** bindings.
+  - Upgraded `wilis audit` to **8 parts** adding empirical `dudect`-style Welch's t-test timing verification + NTT/SIMD/SIV/SLH engine verification, added a dedicated **Miri UB CI job**, and completed a full pre-release security self-audit pass across all new code + 39-parser adversarial fuzzing.
+
 ## [0.5.0] - 2026-11-25
 
 ### Major Feature Release — Multi-Recipient Streaming PQ Encryption, PQ-PCS Ratchet, Length-Hiding Padding, Streaming Sign, ASCII Armor & Expanded FFI

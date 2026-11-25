@@ -20,9 +20,11 @@
 //! - [`stream`] — Constant-memory chunked streaming AEAD (`WILS` v2)
 //! - [`archive`] — `WilisDir` full-directory encrypted archiving with Zip-Slip protection
 //! - [`vault`] — `WilisVault` encrypted local secret & password store
-//! - [`audit`] — 7-part scientific cryptanalysis & statistical randomness audit suite
-//! - [`ffi`] — Stable C-ABI exports (`libwilis`) for C/C++/Python/Node.js bindings
-//! - [`utils`] — Constant-time comparison, volatile zeroization, cross-platform CSPRNG, `WilisPad`, `WilisArmor`, secure prompt, Hex, Base64
+//! - [`net`] — `WilisNet` post-quantum encrypted TCP transport & P2P file transfer (`WNET` v1)
+//! - [`protocols`] — `WilisTOTP`, `WilisFPE`, `WilisVSS` + Proactive Refresh, `WilisZKP`, `WilisTimeLock`, `WilisPAKE`
+//! - [`audit`] — 8-part scientific cryptanalysis, statistical randomness & empirical timing audit suite
+//! - [`ffi`] — Stable C-ABI exports (`libwilis`) for C/C++/Python/Go/Node.js bindings
+//! - [`utils`] — Constant-time ops, volatile zeroization, `mlock`/`shred`, `WilisLZ`, `WilisPad`, `WilisArmor`, `WilisMnemonic`, `WilisKeyWrap`/`Keyring`, `WilisStego`, CSPRNG, prompt, Hex, Base64
 //! - [`cli`] — Command-line application handlers
 
 pub mod aead;
@@ -37,6 +39,8 @@ pub mod hash;
 pub mod kdf;
 pub mod kem;
 pub mod mac;
+pub mod net;
+pub mod protocols;
 pub mod ratchet;
 pub mod sign;
 pub mod split;

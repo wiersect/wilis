@@ -1,11 +1,11 @@
-//! Scientific 7-part cryptanalysis audit & key-commitment security tests for `Wilis`.
+//! Scientific 8-part cryptanalysis, empirical timing & key-commitment security tests for `Wilis`.
 
 use wilis::aead::{open, seal};
 use wilis::audit::run_full_audit;
 use wilis::error::WilisError;
 
 #[test]
-fn full_cryptanalysis_audit_passes_all_6_checks() {
+fn full_cryptanalysis_audit_passes_all_8_checks() {
     let summary = run_full_audit();
 
     assert!(
@@ -34,6 +34,11 @@ fn full_cryptanalysis_audit_passes_all_6_checks() {
         summary.pq_protocols.passed,
         "v0.5.0 PQ protocol audit failed: {:?}",
         summary.pq_protocols
+    );
+    assert!(
+        summary.timing_and_engine.passed,
+        "v0.6.0 timing & engine audit failed: {:?}",
+        summary.timing_and_engine
     );
     assert!(summary.overall_pass, "Overall cryptographic audit failed");
 }

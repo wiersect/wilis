@@ -18,16 +18,19 @@
 use core::slice;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use crate::aead::{open, seal};
+use crate::aead::{open, seal, siv_open, siv_seal, SIV_TAG_BYTES};
 use crate::core::constants::{HASH_BYTES, KEY_BYTES, NONCE_BYTES, SALT_BYTES, TAG_BYTES};
-use crate::hash::hash;
+use crate::hash::{hash, tree_hash};
 use crate::kdf::{derive_key, KdfParams};
 use crate::kem::{
     decapsulate, encapsulate, keygen, KemCiphertext, KemPublicKey, KemSecretKey, KEM_CT_BYTES,
     KEM_PK_BYTES, KEM_SK_BYTES, KEM_SS_BYTES,
 };
 use crate::mac::{derive_subkey, mac};
-use crate::sign::{Signature, SigningKey, VerifyingKey, SIGN_PK_BYTES, SIGN_SK_BYTES};
+use crate::sign::{
+    Signature, SigningKey, SlhPublicKey, SlhSecretKey, SlhSignature, VerifyingKey, SIGN_PK_BYTES,
+    SIGN_SK_BYTES, SLH_PK_BYTES, SLH_SIG_BYTES, SLH_SK_BYTES,
+};
 use crate::utils::random::fill_random;
 use crate::utils::zeroize::zeroize_bytes;
 use crate::xof::WilisXof;
@@ -644,6 +647,243 @@ pub unsafe extern "C" fn wilis_verify_message(
             Err(_) => return WILIS_ERR_AUTH_FAILED,
         };
         if vk.verify(msg_slice, &sig_obj) {
+            WILIS_OK
+        } else {
+            WILIS_ERR_AUTH_FAILED
+        }
+    })
+}
+
+/// Computes the parallel Merkle `WilisTreeHash` 256-bit root digest of `data[..data_len]`.
+///
+/// # Safety
+/// - `out_32` must point to at least 32 writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_tree_hash_256(
+    data: *const u8,
+    data_len: usize,
+    out_32: *mut u8,
+) -> i32 {
+    ffi_guard(|| {
+        if out_32.is_null() {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let digest = {
+            let input = match read_slice(data, data_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            tree_hash(input)
+        };
+        slice::from_raw_parts_mut(out_32, HASH_BYTES).copy_from_slice(&digest);
+        WILIS_OK
+    })
+}
+
+/// Nonce-misuse-resistant `WilisAEAD-SIV` encryption (deterministic synthetic 64-byte SIV tag).
+/// Supports in-place encryption (`ct_out == pt`).
+///
+/// # Safety
+/// - `key_32` (`32` B) and `siv_tag_64_out` (`64` B) must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_siv_seal(
+    key_32: *const u8,
+    aad: *const u8,
+    aad_len: usize,
+    pt: *const u8,
+    pt_len: usize,
+    ct_out: *mut u8,
+    siv_tag_64_out: *mut u8,
+) -> i32 {
+    ffi_guard(|| {
+        if key_32.is_null() || siv_tag_64_out.is_null() {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        if !valid_slice_len(pt_len) || (pt_len > 0 && ct_out.is_null()) {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        if pt_len > 0 && ranges_overlap(ct_out, pt_len, siv_tag_64_out, SIV_TAG_BYTES) {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let (ct, tag) = {
+            let aad_slice = match read_slice(aad, aad_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let pt_slice = match read_slice(pt, pt_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let mut key: [u8; KEY_BYTES] = slice::from_raw_parts(key_32, KEY_BYTES)
+                .try_into()
+                .expect("32 bytes");
+            let r = siv_seal(&key, &[0u8; NONCE_BYTES], aad_slice, pt_slice);
+            zeroize_bytes(&mut key);
+            r
+        };
+        if pt_len > 0 {
+            slice::from_raw_parts_mut(ct_out, pt_len).copy_from_slice(&ct);
+        }
+        slice::from_raw_parts_mut(siv_tag_64_out, SIV_TAG_BYTES).copy_from_slice(&tag);
+        WILIS_OK
+    })
+}
+
+/// Authenticates and decrypts `WilisAEAD-SIV` ciphertext (supports in-place `pt_out == ct`).
+///
+/// # Safety
+/// - `key_32` (`32` B) and `siv_tag_64` (`64` B) must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_siv_open(
+    key_32: *const u8,
+    aad: *const u8,
+    aad_len: usize,
+    ct: *const u8,
+    ct_len: usize,
+    siv_tag_64: *const u8,
+    pt_out: *mut u8,
+) -> i32 {
+    ffi_guard(|| {
+        if key_32.is_null() || siv_tag_64.is_null() {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        if !valid_slice_len(ct_len) || (ct_len > 0 && pt_out.is_null()) {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let res = {
+            let aad_slice = match read_slice(aad, aad_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let ct_slice = match read_slice(ct, ct_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let mut key: [u8; KEY_BYTES] = slice::from_raw_parts(key_32, KEY_BYTES)
+                .try_into()
+                .expect("32 bytes");
+            let tag: [u8; SIV_TAG_BYTES] = slice::from_raw_parts(siv_tag_64, SIV_TAG_BYTES)
+                .try_into()
+                .expect("64 bytes");
+            let r = siv_open(&key, &[0u8; NONCE_BYTES], aad_slice, ct_slice, &tag);
+            zeroize_bytes(&mut key);
+            r
+        };
+        match res {
+            Ok(mut pt) => {
+                if ct_len > 0 {
+                    slice::from_raw_parts_mut(pt_out, ct_len).copy_from_slice(&pt);
+                }
+                zeroize_bytes(&mut pt);
+                WILIS_OK
+            }
+            Err(_) => {
+                if ct_len > 0 {
+                    zeroize_bytes(slice::from_raw_parts_mut(pt_out, ct_len));
+                }
+                WILIS_ERR_AUTH_FAILED
+            }
+        }
+    })
+}
+
+/// Generates a stateless post-quantum `WilisSLH` keypair into `pk_out` (`100` B) and `sk_out` (`164` B).
+///
+/// # Safety
+/// - `pk_out` and `sk_out` must be distinct, non-overlapping writable buffers of `100` and `164` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_slh_keygen(pk_out: *mut u8, sk_out: *mut u8) -> i32 {
+    ffi_guard(|| {
+        if pk_out.is_null()
+            || sk_out.is_null()
+            || ranges_overlap(pk_out, SLH_PK_BYTES, sk_out, SLH_SK_BYTES)
+        {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        match SlhSecretKey::generate() {
+            Ok((sk, pk)) => {
+                slice::from_raw_parts_mut(pk_out, SLH_PK_BYTES).copy_from_slice(&pk.to_bytes());
+                let mut sk_bytes = sk.to_bytes();
+                slice::from_raw_parts_mut(sk_out, SLH_SK_BYTES).copy_from_slice(&sk_bytes);
+                zeroize_bytes(&mut sk_bytes);
+                WILIS_OK
+            }
+            Err(_) => {
+                zeroize_bytes(slice::from_raw_parts_mut(pk_out, SLH_PK_BYTES));
+                zeroize_bytes(slice::from_raw_parts_mut(sk_out, SLH_SK_BYTES));
+                WILIS_ERR_INTERNAL
+            }
+        }
+    })
+}
+
+/// Statelessly signs `msg[..msg_len]` with a `WLS1` secret key (`164` B) into `sig_out` (`8,165` B).
+///
+/// # Safety
+/// - `sk` (`164` B) and `sig_out` (`8,165` B) must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_slh_sign(
+    sk: *const u8,
+    msg: *const u8,
+    msg_len: usize,
+    sig_out: *mut u8,
+) -> i32 {
+    ffi_guard(|| {
+        if sk.is_null() || sig_out.is_null() {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let sig_res = {
+            let msg_slice = match read_slice(msg, msg_len) {
+                Some(s) => s,
+                None => return WILIS_ERR_INVALID_ARG,
+            };
+            let sk_obj = match SlhSecretKey::from_bytes(slice::from_raw_parts(sk, SLH_SK_BYTES)) {
+                Ok(k) => k,
+                Err(_) => return WILIS_ERR_INVALID_ARG,
+            };
+            sk_obj.sign(msg_slice).map(|s| s.to_bytes())
+        };
+        match sig_res {
+            Ok(sig_bytes) => {
+                slice::from_raw_parts_mut(sig_out, SLH_SIG_BYTES).copy_from_slice(&sig_bytes);
+                WILIS_OK
+            }
+            Err(_) => {
+                zeroize_bytes(slice::from_raw_parts_mut(sig_out, SLH_SIG_BYTES));
+                WILIS_ERR_INTERNAL
+            }
+        }
+    })
+}
+
+/// Verifies a stateless `WLSG` signature (`8,165` B) over `msg[..msg_len]` using `pk` (`100` B).
+///
+/// # Safety
+/// - `pk` (`100` B) and `sig` (`8,165` B) must be valid readable buffers.
+#[no_mangle]
+pub unsafe extern "C" fn wilis_slh_verify(
+    pk: *const u8,
+    msg: *const u8,
+    msg_len: usize,
+    sig: *const u8,
+) -> i32 {
+    ffi_guard(|| {
+        if pk.is_null() || sig.is_null() {
+            return WILIS_ERR_INVALID_ARG;
+        }
+        let msg_slice = match read_slice(msg, msg_len) {
+            Some(s) => s,
+            None => return WILIS_ERR_INVALID_ARG,
+        };
+        let pk_obj = match SlhPublicKey::from_bytes(slice::from_raw_parts(pk, SLH_PK_BYTES)) {
+            Ok(k) => k,
+            Err(_) => return WILIS_ERR_INVALID_ARG,
+        };
+        let sig_obj = match SlhSignature::from_bytes(slice::from_raw_parts(sig, SLH_SIG_BYTES)) {
+            Ok(s) => s,
+            Err(_) => return WILIS_ERR_AUTH_FAILED,
+        };
+        if pk_obj.verify(msg_slice, &sig_obj) {
             WILIS_OK
         } else {
             WILIS_ERR_AUTH_FAILED

@@ -1,5 +1,5 @@
 """
-Zero-dependency Python 3 binding for the Wilis v0.5.0 Cryptography Suite (`libwilis`).
+Zero-dependency Python 3 binding for the Wilis v0.6.0 Cryptography Suite (`libwilis`).
 
 Build the shared library first with:
     cargo build --release
@@ -20,6 +20,10 @@ KEM_SS_BYTES = 32
 SIGN_PK_BYTES = 101
 SIGN_SK_BYTES = 137
 SIGN_MAX_SIG_BYTES = 2506
+SIV_TAG_BYTES = 64
+SLH_PK_BYTES = 100
+SLH_SK_BYTES = 164
+SLH_SIG_BYTES = 8165
 _U32_MAX = 0xFFFF_FFFF
 
 
@@ -119,6 +123,24 @@ class Wilis:
 
         self._lib.wilis_verify_message.argtypes = [c_vp, c_vp, c_sz, c_vp, c_sz]
         self._lib.wilis_verify_message.restype = ctypes.c_int32
+
+        self._lib.wilis_tree_hash_256.argtypes = [c_vp, c_sz, c_u8_p]
+        self._lib.wilis_tree_hash_256.restype = ctypes.c_int32
+
+        self._lib.wilis_siv_seal.argtypes = [c_vp, c_vp, c_sz, c_vp, c_sz, c_u8_p, c_u8_p]
+        self._lib.wilis_siv_seal.restype = ctypes.c_int32
+
+        self._lib.wilis_siv_open.argtypes = [c_vp, c_vp, c_sz, c_vp, c_sz, c_vp, c_u8_p]
+        self._lib.wilis_siv_open.restype = ctypes.c_int32
+
+        self._lib.wilis_slh_keygen.argtypes = [c_u8_p, c_u8_p]
+        self._lib.wilis_slh_keygen.restype = ctypes.c_int32
+
+        self._lib.wilis_slh_sign.argtypes = [c_vp, c_vp, c_sz, c_u8_p]
+        self._lib.wilis_slh_sign.restype = ctypes.c_int32
+
+        self._lib.wilis_slh_verify.argtypes = [c_vp, c_vp, c_sz, c_vp]
+        self._lib.wilis_slh_verify.restype = ctypes.c_int32
 
     def version(self) -> str:
         raw = self._lib.wilis_version()
@@ -402,18 +424,135 @@ class Wilis:
             return False
         raise WilisError(f"wilis_verify_message failed (rc={rc})")
 
+    def tree_hash_256(self, data: bytes) -> bytes:
+        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        ptr = ctypes.cast(buf, ctypes.c_void_p) if buf is not None else ctypes.c_void_p(0)
+        out = (ctypes.c_uint8 * 32)()
+        try:
+            rc = self._lib.wilis_tree_hash_256(ptr, len(data), out)
+            if rc != 0:
+                raise WilisError(f"wilis_tree_hash_256 failed (rc={rc})")
+            return bytes(out)
+        finally:
+            _wipe_buf(buf)
+
+    def siv_seal(self, key: bytes, aad: bytes, plaintext: bytes) -> Tuple[bytes, bytes]:
+        if len(key) != 32:
+            raise ValueError("key must be exactly 32 bytes")
+        k_buf = (ctypes.c_uint8 * 32).from_buffer_copy(key)
+        a_buf = (ctypes.c_uint8 * len(aad)).from_buffer_copy(aad) if aad else None
+        p_buf = (ctypes.c_uint8 * len(plaintext)).from_buffer_copy(plaintext) if plaintext else None
+        a_ptr = ctypes.cast(a_buf, ctypes.c_void_p) if a_buf is not None else ctypes.c_void_p(0)
+        p_ptr = ctypes.cast(p_buf, ctypes.c_void_p) if p_buf is not None else ctypes.c_void_p(0)
+        ct_buf = (ctypes.c_uint8 * len(plaintext))()
+        tag_buf = (ctypes.c_uint8 * SIV_TAG_BYTES)()
+        try:
+            rc = self._lib.wilis_siv_seal(
+                ctypes.cast(k_buf, ctypes.c_void_p), a_ptr, len(aad), p_ptr, len(plaintext), ct_buf, tag_buf
+            )
+            if rc != 0:
+                raise WilisError(f"wilis_siv_seal failed (rc={rc})")
+            return bytes(ct_buf), bytes(tag_buf)
+        finally:
+            _wipe_buf(k_buf)
+            _wipe_buf(p_buf)
+
+    def siv_open(self, key: bytes, aad: bytes, ciphertext: bytes, siv_tag: bytes) -> bytes:
+        if len(key) != 32:
+            raise ValueError("key must be exactly 32 bytes")
+        if len(siv_tag) != SIV_TAG_BYTES:
+            raise ValueError(f"siv_tag must be exactly {SIV_TAG_BYTES} bytes")
+        k_buf = (ctypes.c_uint8 * 32).from_buffer_copy(key)
+        t_buf = (ctypes.c_uint8 * SIV_TAG_BYTES).from_buffer_copy(siv_tag)
+        a_buf = (ctypes.c_uint8 * len(aad)).from_buffer_copy(aad) if aad else None
+        c_buf = (ctypes.c_uint8 * len(ciphertext)).from_buffer_copy(ciphertext) if ciphertext else None
+        a_ptr = ctypes.cast(a_buf, ctypes.c_void_p) if a_buf is not None else ctypes.c_void_p(0)
+        c_ptr = ctypes.cast(c_buf, ctypes.c_void_p) if c_buf is not None else ctypes.c_void_p(0)
+        pt_buf = (ctypes.c_uint8 * len(ciphertext))()
+        try:
+            rc = self._lib.wilis_siv_open(
+                ctypes.cast(k_buf, ctypes.c_void_p),
+                a_ptr,
+                len(aad),
+                c_ptr,
+                len(ciphertext),
+                ctypes.cast(t_buf, ctypes.c_void_p),
+                pt_buf,
+            )
+            if rc == -2:
+                raise WilisAuthError("SIV authentication failed")
+            if rc != 0:
+                raise WilisError(f"wilis_siv_open failed (rc={rc})")
+            return bytes(pt_buf)
+        finally:
+            _wipe_buf(k_buf)
+            _wipe_buf(pt_buf)
+
+    def slh_keygen(self) -> Tuple[bytes, bytes]:
+        pk_buf = (ctypes.c_uint8 * SLH_PK_BYTES)()
+        sk_buf = (ctypes.c_uint8 * SLH_SK_BYTES)()
+        try:
+            rc = self._lib.wilis_slh_keygen(pk_buf, sk_buf)
+            if rc != 0:
+                raise WilisError(f"wilis_slh_keygen failed (rc={rc})")
+            return bytes(pk_buf), bytes(sk_buf)
+        finally:
+            _wipe_buf(sk_buf)
+
+    def slh_sign(self, sk: bytes, message: bytes) -> bytes:
+        if len(sk) != SLH_SK_BYTES:
+            raise ValueError(f"sk must be {SLH_SK_BYTES} bytes")
+        sk_buf = (ctypes.c_uint8 * SLH_SK_BYTES).from_buffer_copy(sk)
+        m_buf = (ctypes.c_uint8 * len(message)).from_buffer_copy(message) if message else None
+        m_ptr = ctypes.cast(m_buf, ctypes.c_void_p) if m_buf is not None else ctypes.c_void_p(0)
+        sig_buf = (ctypes.c_uint8 * SLH_SIG_BYTES)()
+        try:
+            rc = self._lib.wilis_slh_sign(ctypes.cast(sk_buf, ctypes.c_void_p), m_ptr, len(message), sig_buf)
+            if rc != 0:
+                raise WilisError(f"wilis_slh_sign failed (rc={rc})")
+            return bytes(sig_buf)
+        finally:
+            _wipe_buf(sk_buf)
+            _wipe_buf(m_buf)
+
+    def slh_verify(self, pk: bytes, message: bytes, signature: bytes) -> bool:
+        if len(pk) != SLH_PK_BYTES:
+            raise ValueError(f"pk must be {SLH_PK_BYTES} bytes")
+        if len(signature) != SLH_SIG_BYTES:
+            return False
+        pk_buf = (ctypes.c_uint8 * SLH_PK_BYTES).from_buffer_copy(pk)
+        m_buf = (ctypes.c_uint8 * len(message)).from_buffer_copy(message) if message else None
+        m_ptr = ctypes.cast(m_buf, ctypes.c_void_p) if m_buf is not None else ctypes.c_void_p(0)
+        s_buf = (ctypes.c_uint8 * SLH_SIG_BYTES).from_buffer_copy(signature)
+        rc = self._lib.wilis_slh_verify(
+            ctypes.cast(pk_buf, ctypes.c_void_p), m_ptr, len(message), ctypes.cast(s_buf, ctypes.c_void_p)
+        )
+        if rc == 0:
+            return True
+        if rc == -2:
+            return False
+        raise WilisError(f"wilis_slh_verify failed (rc={rc})")
+
 
 if __name__ == "__main__":
     w = Wilis()
-    assert w.version() == "0.5.0", f"unexpected version: {w.version()!r}"
-    # 1. AEAD (including empty plaintext/AAD) + MAC + Subkey + XOF + KDF bounds
+    assert w.version() == "0.6.0", f"unexpected version: {w.version()!r}"
+    # 1. AEAD (including empty plaintext/AAD) + SIV + TreeHash + MAC + Subkey + XOF + KDF bounds
     key = w.random_bytes(32)
     nonce = w.random_bytes(24)
-    msg = b"\x00Hello from Wilis v0.5.0 Python C-FFI!\x00"
+    msg = b"\x00Hello from Wilis v0.6.0 Python C-FFI!\x00"
     ct, tag = w.aead_seal(key, nonce, b"py-aad", msg)
     assert w.aead_open(key, nonce, b"py-aad", ct, tag) == msg
     e_ct, e_tag = w.aead_seal(key, nonce, b"", b"")
     assert e_ct == b"" and w.aead_open(key, nonce, b"", e_ct, e_tag) == b""
+
+    siv_ct, siv_tag = w.siv_seal(key, b"siv-aad", msg)
+    assert len(siv_tag) == SIV_TAG_BYTES
+    assert w.siv_open(key, b"siv-aad", siv_ct, siv_tag) == msg
+    th1 = w.tree_hash_256(msg * 500)
+    th2 = w.tree_hash_256(msg * 500)
+    assert len(th1) == 32 and th1 == th2
+
     mtag = w.mac_256(key, msg)
     assert w.mac_verify(key, msg, mtag)
     assert not w.mac_verify(key, msg + b"!", mtag)
@@ -429,7 +568,7 @@ if __name__ == "__main__":
         except ValueError:
             pass
 
-    # 2. Post-Quantum WilisKEM (including corrupted secret-key LWE rejection)
+    # 2. Post-Quantum WilisKEM (NTT-accelerated, including corrupted secret-key rejection)
     pk, sk = w.kem_keygen()
     kem_ct, ss1 = w.kem_encapsulate(pk)
     ss2 = w.kem_decapsulate(sk, kem_ct)
@@ -442,11 +581,18 @@ if __name__ == "__main__":
     except WilisError:
         pass
 
-    # 3. Post-Quantum WilisSign (WOTS+ Merkle)
+    # 3. Post-Quantum WilisSign (stateful WOTS+ Merkle)
     spk, ssk = w.sign_keygen(height=2)
     ssk2, sig = w.sign_message(ssk, msg)
     assert ssk2 != ssk
     assert w.verify_message(spk, msg, sig)
     assert not w.verify_message(spk, msg + b"!", sig)
 
-    print("Python C-FFI v0.5.0 (AEAD + MAC + Subkey + XOF + KDF + KEM + Sign): PASS")
+    # 4. Post-Quantum WilisSLH (stateless FORS + Hypertree)
+    lpk, lsk = w.slh_keygen()
+    lsig = w.slh_sign(lsk, msg)
+    assert len(lsig) == SLH_SIG_BYTES
+    assert w.slh_verify(lpk, msg, lsig)
+    assert not w.slh_verify(lpk, msg + b"!", lsig)
+
+    print("Python C-FFI v0.6.0 (AEAD + SIV + TreeHash + MAC + Subkey + XOF + KDF + KEM + Sign + SLH): PASS")
